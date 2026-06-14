@@ -1,0 +1,2 @@
+ALTER TABLE emails ADD COLUMN unsubscribe_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE emails ADD COLUMN unsubscribe_post INTEGER NOT NULL DEFAULT 0;

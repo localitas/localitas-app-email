@@ -1,0 +1,10 @@
+name: email
+display_name: Email
+description: IMAP email client with full-text search
+version: 0.1.0
+
+database:
+  name: email
+  system: true
+
+migrations_dir: migrations

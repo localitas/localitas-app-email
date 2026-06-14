@@ -1,0 +1,1 @@
+ALTER TABLE folders ADD COLUMN last_synced_uid INTEGER DEFAULT 0;
