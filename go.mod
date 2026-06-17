@@ -6,7 +6,7 @@ require (
 	github.com/emersion/go-imap v1.2.1
 	github.com/emersion/go-message v0.18.2
 	github.com/grandcat/zeroconf v1.0.0
-	github.com/localitas/localitas-go v0.0.0-00010101000000-000000000000
+	github.com/localitas/localitas-go v0.1.12
 	github.com/urfave/cli/v3 v3.9.1
 )
 
@@ -19,4 +19,3 @@ require (
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 )
-
