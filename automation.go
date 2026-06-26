@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const syncAutomationName = "Email Sync"
+const syncAutomationName = "Email: Sync"
 
 func RegisterSyncAutomation(coreURL, token, appURL string) {
 	if automationExists(coreURL, token, syncAutomationName) {
@@ -21,7 +21,7 @@ func RegisterSyncAutomation(coreURL, token, appURL string) {
 		"description": "Syncs all email accounts every 5 minutes",
 		"dag_config": map[string]interface{}{
 			"dag_id":      "email_sync_all",
-			"name":        "Email Sync All",
+			"name":        "Email: Sync All",
 			"description": "Periodic sync of all email accounts",
 			"nodes": []map[string]interface{}{
 				{
