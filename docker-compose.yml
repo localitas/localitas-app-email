@@ -1,6 +1,7 @@
 services:
   web:
     image: ghcr.io/localitas/localitas-app-email:latest
+    command: ["serve", "--listen", ":8000", "--base-path", "/apps/ext/email/"]
     ports:
       - "${APP_PORT:-9208}:8000"
     environment:
