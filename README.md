@@ -51,6 +51,23 @@ Localitas apps are accessible remotely through Localitas's built-in tunnel servi
 
 All traffic is encrypted end-to-end. Authentication is handled by the Localitas core — only authorized users can access your apps.
 
+## App Store
+
+Install via the Localitas App Store (recommended):
+
+```bash
+localitas-core app-store add --name email --compose ./docker-compose.yml --port 9208
+localitas-core app-store start email
+```
+
+Or open the App Store UI (package icon, top-right nav) and paste the `docker-compose.yml`.
+
+The image is published to `ghcr.io/localitas/localitas-app-email:latest`. To publish a new version:
+
+```bash
+make docker-push   # runs tests, builds, and pushes to ghcr.io
+```
+
 ## License
 
 MIT
