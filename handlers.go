@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/localitas/localitas-go"
+	"github.com/localitas/localitas-go/httputil"
 )
 
 type handler struct {
@@ -19,13 +20,13 @@ func (h *handler) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	userID := client.UserIDFromRequest(r)
 	accounts, err := h.app.Store.ListAccounts(r.Context(), userID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
 	for _, a := range accounts {
 		a.UnreadCount = h.app.Store.GetAccountUnreadCount(r.Context(), a.ID)
 	}
-	writeJSON(w, http.StatusOK, accounts)
+	writeJSON(w, r, http.StatusOK, accounts)
 }
 
 func (h *handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -45,14 +46,14 @@ func (h *handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		VaultCredentialID string `json:"vault_credential_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid body")
+		writeErr(w, r, http.StatusBadRequest, "invalid body")
 		return
 	}
 
 	if req.VaultCredentialID != "" && h.app.client != nil {
 		secrets, err := h.app.client.WithToken(client.TokenFromRequest(r)).VaultGetSecrets(r.Context(), req.VaultCredentialID)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, "failed to resolve vault credential: %v", err)
+			writeErr(w, r, http.StatusBadRequest, "failed to resolve vault credential: %v", err)
 			return
 		}
 		if req.Email == "" {
@@ -87,12 +88,12 @@ func (h *handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Email == "" {
-		writeErr(w, http.StatusBadRequest, "email is required")
+		writeErr(w, r, http.StatusBadRequest, "email is required")
 		return
 	}
 	if req.Provider == "gmail-oauth" {
 		if req.OAuthClientID == "" || req.OAuthClientSecret == "" {
-			writeErr(w, http.StatusBadRequest, "oauth_client_id and oauth_client_secret are required for Gmail OAuth")
+			writeErr(w, r, http.StatusBadRequest, "oauth_client_id and oauth_client_secret are required for Gmail OAuth")
 			return
 		}
 		req.IMAPHost = "imap.gmail.com"
@@ -103,7 +104,7 @@ func (h *handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		req.Username = req.Email
 	} else {
 		if req.IMAPHost == "" || req.Username == "" || req.Password == "" {
-			writeErr(w, http.StatusBadRequest, "imap_host, username, password are required")
+			writeErr(w, r, http.StatusBadRequest, "imap_host, username, password are required")
 			return
 		}
 	}
@@ -122,10 +123,10 @@ func (h *handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	userID := client.UserIDFromRequest(r)
 	account, err := h.app.Store.CreateAccount(r.Context(), userID, req.Name, req.Email, req.Provider, req.IMAPHost, req.IMAPPort, req.SMTPHost, req.SMTPPort, req.Username, req.Password, req.OAuthClientID, req.OAuthClientSecret, req.UseTLS, req.VaultCredentialID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, account)
+	writeJSON(w, r, http.StatusCreated, account)
 }
 
 func (h *handler) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
@@ -145,79 +146,79 @@ func (h *handler) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		UseTLS            bool   `json:"use_tls"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid body")
+		writeErr(w, r, http.StatusBadRequest, "invalid body")
 		return
 	}
 	if err := h.app.Store.UpdateAccount(r.Context(), id, req.Name, req.Email, req.Provider, req.IMAPHost, req.IMAPPort, req.SMTPHost, req.SMTPPort, req.Username, req.Password, req.OAuthClientID, req.OAuthClientSecret, req.UseTLS); err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	h.app.Store.DeleteAccount(r.Context(), id)
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleListFolders(w http.ResponseWriter, r *http.Request) {
 	accountID := r.URL.Query().Get("account_id")
 	if accountID == "" {
-		writeErr(w, http.StatusBadRequest, "account_id is required")
+		writeErr(w, r, http.StatusBadRequest, "account_id is required")
 		return
 	}
 	folders, err := h.app.Store.ListFolders(r.Context(), accountID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, folders)
+	writeJSON(w, r, http.StatusOK, folders)
 }
 
 func (h *handler) handleListEmails(w http.ResponseWriter, r *http.Request) {
 	folderID := r.URL.Query().Get("folder_id")
 	if folderID == "" {
-		writeErr(w, http.StatusBadRequest, "folder_id is required")
+		writeErr(w, r, http.StatusBadRequest, "folder_id is required")
 		return
 	}
 	limit := intParam(r, "limit", 50)
 	offset := intParam(r, "offset", 0)
 	emails, err := h.app.Store.ListEmails(r.Context(), folderID, limit, offset)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, emails)
+	writeJSON(w, r, http.StatusOK, emails)
 }
 
 func (h *handler) handleGetEmail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	e, err := h.app.Store.GetEmail(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "email not found")
+		writeErr(w, r, http.StatusNotFound, "email not found")
 		return
 	}
 	h.app.Store.MarkRead(r.Context(), id)
-	writeJSON(w, http.StatusOK, e)
+	writeJSON(w, r, http.StatusOK, e)
 }
 
 func (h *handler) handleMarkUnread(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	h.app.Store.MarkUnread(r.Context(), id)
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleToggleStar(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	h.app.Store.ToggleStar(r.Context(), id)
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	if q == "" {
-		writeErr(w, http.StatusBadRequest, "q is required")
+		writeErr(w, r, http.StatusBadRequest, "q is required")
 		return
 	}
 	var emails []*Email
@@ -228,10 +229,10 @@ func (h *handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 		emails, err = h.app.Store.SearchEmails(r.Context(), q, 20)
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, emails)
+	writeJSON(w, r, http.StatusOK, emails)
 }
 
 func (h *handler) handleSync(w http.ResponseWriter, r *http.Request) {
@@ -240,52 +241,52 @@ func (h *handler) handleSync(w http.ResponseWriter, r *http.Request) {
 	var err error
 	account, err = h.app.Store.GetAccount(r.Context(), accountID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, r, http.StatusNotFound, "account not found")
 		return
 	}
 	if account.NeedsOAuth() {
 		account, err = h.app.Store.GetAccountWithTokens(r.Context(), accountID)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "get tokens: %v", err)
+			writeErr(w, r, http.StatusInternalServerError, "get tokens: %v", err)
 			return
 		}
 	}
 	result, err := SyncAccount(r.Context(), h.app.Store, account, 200, &SyncConfig{CoreURL: h.app.CoreURL, AuthToken: h.app.AuthToken})
 	if err != nil {
 		h.app.Store.UpdateSyncStatus(r.Context(), accountID, err.Error())
-		writeErr(w, http.StatusInternalServerError, "sync failed: %v", err)
+		writeErr(w, r, http.StatusInternalServerError, "sync failed: %v", err)
 		return
 	}
 	h.app.Store.UpdateSyncStatus(r.Context(), accountID, "")
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, r, http.StatusOK, result)
 }
 
 func (h *handler) handleSyncFolder(w http.ResponseWriter, r *http.Request) {
 	folderID := r.PathValue("id")
 	folder, err := h.app.Store.GetFolderByID(r.Context(), folderID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "folder not found")
+		writeErr(w, r, http.StatusNotFound, "folder not found")
 		return
 	}
 	var account *Account
 	account, err = h.app.Store.GetAccount(r.Context(), folder.AccountID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, r, http.StatusNotFound, "account not found")
 		return
 	}
 	if account.NeedsOAuth() {
 		account, err = h.app.Store.GetAccountWithTokens(r.Context(), folder.AccountID)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "get tokens: %v", err)
+			writeErr(w, r, http.StatusInternalServerError, "get tokens: %v", err)
 			return
 		}
 	}
 	result, err := SyncSingleFolder(r.Context(), h.app.Store, account, folder, 200, &SyncConfig{CoreURL: h.app.CoreURL, AuthToken: h.app.AuthToken})
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "sync failed: %v", err)
+		writeErr(w, r, http.StatusInternalServerError, "sync failed: %v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, r, http.StatusOK, result)
 }
 
 func (h *handler) handleDeleteEmail(w http.ResponseWriter, r *http.Request) {
@@ -294,52 +295,52 @@ func (h *handler) handleDeleteEmail(w http.ResponseWriter, r *http.Request) {
 
 	accountID, folderID, uid, err := h.app.Store.GetEmailUID(ctx, id)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "email not found")
+		writeErr(w, r, http.StatusNotFound, "email not found")
 		return
 	}
 
 	account, err := h.app.Store.GetAccount(ctx, accountID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "account not found: %v", err)
+		writeErr(w, r, http.StatusInternalServerError, "account not found: %v", err)
 		return
 	}
 	if account.NeedsOAuth() {
 		account, err = h.app.Store.GetAccountWithTokens(ctx, accountID)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "get tokens: %v", err)
+			writeErr(w, r, http.StatusInternalServerError, "get tokens: %v", err)
 			return
 		}
 		if err := EnsureValidToken(ctx, h.app.Store, account); err != nil {
-			writeErr(w, http.StatusInternalServerError, "oauth: %v", err)
+			writeErr(w, r, http.StatusInternalServerError, "oauth: %v", err)
 			return
 		}
 	}
 
 	folderRemote, err := h.app.Store.GetFolderRemoteName(ctx, folderID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "folder not found: %v", err)
+		writeErr(w, r, http.StatusInternalServerError, "folder not found: %v", err)
 		return
 	}
 
 	if err := MoveToTrash(account, folderRemote, uid); err != nil {
-		writeErr(w, http.StatusInternalServerError, "IMAP delete failed: %v", err)
+		writeErr(w, r, http.StatusInternalServerError, "IMAP delete failed: %v", err)
 		return
 	}
 
 	if err := h.app.Store.SoftDelete(ctx, id); err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleRestoreEmail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.app.Store.RestoreEmail(r.Context(), id); err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleListTrash(w http.ResponseWriter, r *http.Request) {
@@ -348,10 +349,10 @@ func (h *handler) handleListTrash(w http.ResponseWriter, r *http.Request) {
 	offset := intParam(r, "offset", 0)
 	emails, err := h.app.Store.ListDeletedEmails(r.Context(), accountID, limit, offset)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, emails)
+	writeJSON(w, r, http.StatusOK, emails)
 }
 
 func (h *handler) handleCompose(w http.ResponseWriter, r *http.Request) {
@@ -386,13 +387,13 @@ func (h *handler) handleCompose(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			writeErr(w, r, http.StatusBadRequest, "invalid body")
 			return
 		}
 	}
 
 	if req.AccountID == "" || len(req.To) == 0 || req.Subject == "" {
-		writeErr(w, http.StatusBadRequest, "account_id, to, subject are required")
+		writeErr(w, r, http.StatusBadRequest, "account_id, to, subject are required")
 		return
 	}
 
@@ -400,27 +401,27 @@ func (h *handler) handleCompose(w http.ResponseWriter, r *http.Request) {
 	var err error
 	account, err = h.app.Store.GetAccount(r.Context(), req.AccountID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, r, http.StatusNotFound, "account not found")
 		return
 	}
 	if account.NeedsOAuth() {
 		account, err = h.app.Store.GetAccountWithTokens(r.Context(), req.AccountID)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "get tokens: %v", err)
+			writeErr(w, r, http.StatusInternalServerError, "get tokens: %v", err)
 			return
 		}
 		if err := EnsureValidToken(r.Context(), h.app.Store, account); err != nil {
-			writeErr(w, http.StatusInternalServerError, "oauth: %v", err)
+			writeErr(w, r, http.StatusInternalServerError, "oauth: %v", err)
 			return
 		}
 	}
 
 	if err := SendEmailWithAttachments(account, req.To, req.Cc, req.Bcc, req.Subject, req.Body, req.BodyHTML, req.InReplyTo, attachFiles); err != nil {
-		writeErr(w, http.StatusInternalServerError, "send failed: %v", err)
+		writeErr(w, r, http.StatusInternalServerError, "send failed: %v", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) oauthRedirectURI(r *http.Request) string {
@@ -442,28 +443,28 @@ func (h *handler) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	accountID := r.PathValue("id")
 	account, err := h.app.Store.GetAccount(r.Context(), accountID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, r, http.StatusNotFound, "account not found")
 		return
 	}
 	if account.OAuthClientID == "" {
-		writeErr(w, http.StatusBadRequest, "no OAuth client ID configured")
+		writeErr(w, r, http.StatusBadRequest, "no OAuth client ID configured")
 		return
 	}
 	redirectURI := h.oauthRedirectURI(r)
 	authURL := GoogleAuthRedirectURL(account.OAuthClientID, redirectURI, accountID)
-	writeJSON(w, http.StatusOK, map[string]string{"auth_url": authURL, "redirect_uri": redirectURI})
+	writeJSON(w, r, http.StatusOK, map[string]string{"auth_url": authURL, "redirect_uri": redirectURI})
 }
 
 func (h *handler) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	accountID := r.URL.Query().Get("state")
 	if code == "" || accountID == "" {
-		writeErr(w, http.StatusBadRequest, "missing code or state")
+		writeErr(w, r, http.StatusBadRequest, "missing code or state")
 		return
 	}
 	account, err := h.app.Store.GetAccount(r.Context(), accountID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, r, http.StatusNotFound, "account not found")
 		return
 	}
 	redirectURI := h.oauthRedirectURI(r)
@@ -486,25 +487,25 @@ func (h *handler) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 func (h *handler) handleGetThread(w http.ResponseWriter, r *http.Request) {
 	threadID := r.URL.Query().Get("thread_id")
 	if threadID == "" {
-		writeErr(w, http.StatusBadRequest, "thread_id is required")
+		writeErr(w, r, http.StatusBadRequest, "thread_id is required")
 		return
 	}
 	emails, err := h.app.Store.ListThreadEmails(r.Context(), threadID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, emails)
+	writeJSON(w, r, http.StatusOK, emails)
 }
 
 func (h *handler) handleListAttachments(w http.ResponseWriter, r *http.Request) {
 	emailID := r.PathValue("id")
 	attachments, err := h.app.Store.ListAttachments(r.Context(), emailID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, attachments)
+	writeJSON(w, r, http.StatusOK, attachments)
 }
 
 func (h *handler) handleDownloadAttachment(w http.ResponseWriter, r *http.Request) {
@@ -513,12 +514,12 @@ func (h *handler) handleDownloadAttachment(w http.ResponseWriter, r *http.Reques
 	err := h.app.Store.db.QueryRowContext(r.Context(), "SELECT id, email_id, account_id, filename, content_type, size_bytes, storage_path, created_at FROM attachments WHERE id = ?", attachID).
 		Scan(&att.ID, &att.EmailID, &att.AccountID, &att.Filename, &att.ContentType, &att.SizeBytes, &att.StoragePath, &att.CreatedAt)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "attachment not found")
+		writeErr(w, r, http.StatusNotFound, "attachment not found")
 		return
 	}
 	data, contentType, err := GetAttachmentFromManagedFS(r.Context(), h.app.CoreURL, h.app.AuthToken, att.StoragePath)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "download failed: %v", err)
+		writeErr(w, r, http.StatusInternalServerError, "download failed: %v", err)
 		return
 	}
 	if contentType == "" {
@@ -542,44 +543,44 @@ func (h *handler) handleSaveDraft(w http.ResponseWriter, r *http.Request) {
 		InReplyTo    string `json:"in_reply_to"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid body")
+		writeErr(w, r, http.StatusBadRequest, "invalid body")
 		return
 	}
 	draft, err := h.app.Store.SaveDraft(r.Context(), req.ID, req.AccountID, req.ToAddresses, req.CcAddresses, req.BccAddresses, req.Subject, req.BodyText, req.BodyHTML, req.InReplyTo)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, draft)
+	writeJSON(w, r, http.StatusOK, draft)
 }
 
 func (h *handler) handleListDrafts(w http.ResponseWriter, r *http.Request) {
 	drafts, err := h.app.Store.ListDrafts(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, drafts)
+	writeJSON(w, r, http.StatusOK, drafts)
 }
 
 func (h *handler) handleGetDraft(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	draft, err := h.app.Store.GetDraft(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "draft not found")
+		writeErr(w, r, http.StatusNotFound, "draft not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, draft)
+	writeJSON(w, r, http.StatusOK, draft)
 }
 
 func (h *handler) handleDeleteDraft(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	h.app.Store.DeleteDraft(r.Context(), id)
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleListPresets(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, Presets)
+	writeJSON(w, r, http.StatusOK, Presets)
 }
 
 func (h *handler) handleUnsubscribe(w http.ResponseWriter, r *http.Request) {
@@ -593,14 +594,14 @@ func (h *handler) handleUnsubscribe(w http.ResponseWriter, r *http.Request) {
 
 	e, err := h.app.Store.GetEmail(ctx, id)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "email not found")
+		writeErr(w, r, http.StatusNotFound, "email not found")
 		return
 	}
 	if e.UnsubscribeURL == "" && req.URL != "" {
 		e.UnsubscribeURL = req.URL
 	}
 	if e.UnsubscribeURL == "" {
-		writeErr(w, http.StatusBadRequest, "no unsubscribe URL available")
+		writeErr(w, r, http.StatusBadRequest, "no unsubscribe URL available")
 		return
 	}
 
@@ -638,12 +639,12 @@ func (h *handler) handleUnsubscribe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if unsubErr != "" {
-		writeErr(w, http.StatusInternalServerError, "unsubscribe failed: %s", unsubErr)
+		writeErr(w, r, http.StatusInternalServerError, "unsubscribe failed: %s", unsubErr)
 		return
 	}
 
 	h.app.Store.SoftDelete(ctx, id)
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleSyncAll(w http.ResponseWriter, r *http.Request) {
@@ -656,7 +657,7 @@ func (h *handler) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 		accounts, err = h.app.Store.ListAllAccounts(r.Context())
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
 
@@ -681,7 +682,7 @@ func (h *handler) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 		totalNew += result.NewEmails
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, r, http.StatusOK, map[string]interface{}{
 		"accounts_synced": len(accounts),
 		"new_emails":      totalNew,
 		"errors":          errors,
@@ -691,18 +692,18 @@ func (h *handler) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 func (h *handler) handleListFilters(w http.ResponseWriter, r *http.Request) {
 	accountID := r.URL.Query().Get("account_id")
 	if accountID == "" {
-		writeErr(w, http.StatusBadRequest, "account_id is required")
+		writeErr(w, r, http.StatusBadRequest, "account_id is required")
 		return
 	}
 	filters, err := h.app.Store.ListFilters(r.Context(), accountID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "%v", err)
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
 	if filters == nil {
 		filters = make([]*Filter, 0)
 	}
-	writeJSON(w, http.StatusOK, filters)
+	writeJSON(w, r, http.StatusOK, filters)
 }
 
 func (h *handler) handleCreateFilter(w http.ResponseWriter, r *http.Request) {
@@ -711,19 +712,19 @@ func (h *handler) handleCreateFilter(w http.ResponseWriter, r *http.Request) {
 		Rule      string `json:"rule"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid body")
+		writeErr(w, r, http.StatusBadRequest, "invalid body")
 		return
 	}
 	if req.AccountID == "" || req.Rule == "" {
-		writeErr(w, http.StatusBadRequest, "account_id and rule are required")
+		writeErr(w, r, http.StatusBadRequest, "account_id and rule are required")
 		return
 	}
 	filter, err := h.app.Store.CreateFilter(r.Context(), req.AccountID, req.Rule)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "%v", err)
+		writeErr(w, r, http.StatusBadRequest, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, filter)
+	writeJSON(w, r, http.StatusCreated, filter)
 }
 
 func (h *handler) handleUpdateFilter(w http.ResponseWriter, r *http.Request) {
@@ -733,24 +734,24 @@ func (h *handler) handleUpdateFilter(w http.ResponseWriter, r *http.Request) {
 		IsActive bool   `json:"is_active"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid body")
+		writeErr(w, r, http.StatusBadRequest, "invalid body")
 		return
 	}
 	if req.Rule == "" {
-		writeErr(w, http.StatusBadRequest, "rule is required")
+		writeErr(w, r, http.StatusBadRequest, "rule is required")
 		return
 	}
 	if err := h.app.Store.UpdateFilter(r.Context(), id, req.Rule, req.IsActive); err != nil {
-		writeErr(w, http.StatusBadRequest, "%v", err)
+		writeErr(w, r, http.StatusBadRequest, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleDeleteFilter(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	h.app.Store.DeleteFilter(r.Context(), id)
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleTestFilter(w http.ResponseWriter, r *http.Request) {
@@ -758,27 +759,23 @@ func (h *handler) handleTestFilter(w http.ResponseWriter, r *http.Request) {
 		Rule string `json:"rule"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid body")
+		writeErr(w, r, http.StatusBadRequest, "invalid body")
 		return
 	}
 	pf, err := ParseFilter(req.Rule)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "%v", err)
+		writeErr(w, r, http.StatusBadRequest, "%v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, pf)
+	writeJSON(w, r, http.StatusOK, pf)
 }
 
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+func writeJSON(w http.ResponseWriter, r *http.Request, status int, v interface{}) {
+	httputil.WriteResponse(w, r, status, v)
 }
 
-func writeErr(w http.ResponseWriter, status int, format string, args ...interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf(format, args...)})
+func writeErr(w http.ResponseWriter, r *http.Request, status int, format string, args ...interface{}) {
+	httputil.WriteError(w, r, status, format, args...)
 }
 
 func intParam(r *http.Request, key string, def int) int {
