@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"mime/multipart"
 	"net/http"
 	"net/smtp"
@@ -112,7 +111,7 @@ func SyncAccount(ctx context.Context, store *Store, account *Account, maxMessage
 	for _, mb := range mbList {
 		folder, err := store.UpsertFolder(ctx, account.ID, mb.Name, mb.Name)
 		if err != nil {
-			log.Printf("⚠️  Failed to upsert folder %s: %v", mb.Name, err)
+			logger.Error("failed to upsert folder", "folder", mb.Name, "error", err)
 			continue
 		}
 		result.Folders++
@@ -128,7 +127,7 @@ func SyncAccount(ctx context.Context, store *Store, account *Account, maxMessage
 		}
 		n, err := syncFolder(ctx, c, store, account.ID, fs.folder, folderMax, syncCfg)
 		if err != nil {
-			log.Printf("⚠️  Failed to sync folder %s: %v", fs.name, err)
+			logger.Error("failed to sync folder", "folder", fs.name, "error", err)
 			result.Errors = append(result.Errors, fs.name+": "+err.Error())
 			continue
 		}
@@ -137,7 +136,7 @@ func SyncAccount(ctx context.Context, store *Store, account *Account, maxMessage
 
 	trashed, err := SyncTrashFolder(ctx, store, account, maxMessages)
 	if err != nil {
-		log.Printf("⚠️  Failed to sync trash: %v", err)
+		logger.Error("failed to sync trash", "error", err)
 	}
 	result.Trashed = trashed
 
@@ -792,13 +791,13 @@ func saveEmailAttachments(ctx context.Context, store *Store, cfg *SyncConfig, ac
 	for _, att := range atts {
 		if cfg.CoreURL != "" && scanAttachment(ctx, cfg, att) {
 			store.MarkDangerous(ctx, emailID)
-			log.Printf("⚠️  Dangerous attachment detected: %s in email %s", att.Filename, emailID)
+			logger.Warn("dangerous attachment detected", "filename", att.Filename, "email_id", emailID)
 			continue
 		}
 
 		storagePath, err := SaveAttachmentToManagedFS(ctx, cfg.CoreURL, cfg.AuthToken, emailID, att.Filename, att.Data)
 		if err != nil {
-			log.Printf("⚠️  Failed to save attachment %s: %v", att.Filename, err)
+			logger.Error("failed to save attachment", "filename", att.Filename, "error", err)
 			continue
 		}
 		store.InsertAttachment(ctx, emailID, accountID, att.Filename, att.ContentType, storagePath, int64(len(att.Data)))
@@ -828,7 +827,7 @@ func scanAttachment(ctx context.Context, cfg *SyncConfig, att attachmentData) bo
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("⚠️  Antivirus scan unavailable for %s: %v", att.Filename, err)
+		logger.Warn("antivirus scan unavailable", "filename", att.Filename, "error", err)
 		return false
 	}
 	defer resp.Body.Close()

@@ -3,7 +3,6 @@ package email
 import (
 	"bytes"
 	"encoding/json"
-	"log"
 	"net/http"
 	"time"
 )
@@ -12,7 +11,7 @@ const syncAutomationName = "Email: Sync"
 
 func RegisterSyncAutomation(coreURL, token, appURL string) {
 	if automationExists(coreURL, token, syncAutomationName) {
-		log.Printf("✅ Email sync automation already registered")
+		logger.Info("email sync automation already registered")
 		return
 	}
 
@@ -53,7 +52,7 @@ func RegisterSyncAutomation(coreURL, token, appURL string) {
 	b, _ := json.Marshal(body)
 	req, err := http.NewRequest("POST", coreURL+"/apps/automation/api/automations", bytes.NewReader(b))
 	if err != nil {
-		log.Printf("⚠️  Failed to create email sync automation request: %v", err)
+		logger.Error("failed to create email sync automation request", "error", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -64,15 +63,15 @@ func RegisterSyncAutomation(coreURL, token, appURL string) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("⚠️  Failed to register email sync automation: %v", err)
+		logger.Error("failed to register email sync automation", "error", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
-		log.Printf("✅ Registered email sync automation (every 5 minutes)")
+		logger.Info("registered email sync automation", "interval", "every 5 minutes")
 	} else {
-		log.Printf("⚠️  Email sync automation registration returned %d", resp.StatusCode)
+		logger.Warn("email sync automation registration returned unexpected status", "status", resp.StatusCode)
 	}
 }
 

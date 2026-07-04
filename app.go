@@ -3,12 +3,14 @@ package email
 import (
 	"context"
 	"html/template"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/localitas/localitas-go"
 )
+
+var logger = slog.Default().With("component", "email")
 
 type App struct {
 	Store     *Store
@@ -38,12 +40,12 @@ func (a *App) Install(ctx context.Context) (string, error) {
 	for attempt := 1; ; attempt++ {
 		db, err := a.client.CreateSystemDatabase(ctx, DatabaseName)
 		if err != nil {
-			log.Printf("install: attempt %d failed (retrying): %v", attempt, err)
+			logger.Warn("install attempt failed", "attempt", attempt, "error", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
 		if err := applyEmbeddedMigrations(ctx, a.client, db.ID); err != nil {
-			log.Printf("install: migrations attempt %d failed (retrying): %v", attempt, err)
+			logger.Warn("install migrations attempt failed", "attempt", attempt, "error", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
@@ -54,7 +56,7 @@ func (a *App) Install(ctx context.Context) (string, error) {
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	tmpl, err := template.ParseFS(TemplatesFS, "templates/index.html")
 	if err != nil {
-		log.Printf("email index template error: %v", err)
+		logger.Error("index template error", "error", err)
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
