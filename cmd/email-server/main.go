@@ -100,6 +100,7 @@ func serveAction(ctx context.Context, cmd *cli.Command) error {
 	mux := http.NewServeMux()
 	a.RegisterRoutes(mux)
 	mux.HandleFunc("GET /health.json", email.HandleHealth)
+	mux.HandleFunc("GET /cron.json", email.HandleCron)
 
 	ln, err := net.Listen("tcp", cmd.String("listen"))
 	if err != nil {
