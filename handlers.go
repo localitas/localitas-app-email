@@ -695,7 +695,7 @@ func (h *handler) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 		return h.doSyncAll(ctx, userID)
 	}
 
-	if client.RunAsync(w, r, h.app.client, work) {
+	if h.app.client.RunAsync(w, r, work) {
 		return
 	}
 
