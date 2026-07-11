@@ -1,6 +1,7 @@
 package email
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -647,18 +648,16 @@ func (h *handler) handleUnsubscribe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
-func (h *handler) handleSyncAll(w http.ResponseWriter, r *http.Request) {
-	userID := client.UserIDFromRequest(r)
+func (h *handler) doSyncAll(ctx context.Context, userID string) (map[string]interface{}, error) {
 	var accounts []*Account
 	var err error
 	if userID != "" {
-		accounts, err = h.app.Store.ListAccounts(r.Context(), userID)
+		accounts, err = h.app.Store.ListAccounts(ctx, userID)
 	} else {
-		accounts, err = h.app.Store.ListAllAccounts(r.Context())
+		accounts, err = h.app.Store.ListAllAccounts(ctx)
 	}
 	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "%v", err)
-		return
+		return nil, err
 	}
 
 	totalNew := 0
@@ -666,27 +665,46 @@ func (h *handler) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 	for _, a := range accounts {
 		account := a
 		if account.NeedsOAuth() {
-			account, err = h.app.Store.GetAccountWithTokens(r.Context(), a.ID)
+			account, err = h.app.Store.GetAccountWithTokens(ctx, a.ID)
 			if err != nil {
 				errors = append(errors, a.Name+": "+err.Error())
 				continue
 			}
 		}
-		result, err := SyncAccount(r.Context(), h.app.Store, account, 200, &SyncConfig{CoreURL: h.app.CoreURL, AuthToken: h.app.AuthToken})
+		result, err := SyncAccount(ctx, h.app.Store, account, 200, &SyncConfig{CoreURL: h.app.CoreURL, AuthToken: h.app.AuthToken})
 		if err != nil {
 			errors = append(errors, a.Name+": "+err.Error())
-			h.app.Store.UpdateSyncStatus(r.Context(), a.ID, err.Error())
+			h.app.Store.UpdateSyncStatus(ctx, a.ID, err.Error())
 			continue
 		}
-		h.app.Store.UpdateSyncStatus(r.Context(), a.ID, "")
+		h.app.Store.UpdateSyncStatus(ctx, a.ID, "")
 		totalNew += result.NewEmails
 	}
 
-	writeJSON(w, r, http.StatusOK, map[string]interface{}{
+	return map[string]interface{}{
 		"accounts_synced": len(accounts),
 		"new_emails":      totalNew,
 		"errors":          errors,
-	})
+	}, nil
+}
+
+func (h *handler) handleSyncAll(w http.ResponseWriter, r *http.Request) {
+	userID := client.UserIDFromRequest(r)
+
+	work := func(ctx context.Context) (map[string]interface{}, error) {
+		return h.doSyncAll(ctx, userID)
+	}
+
+	if client.RunAsync(w, r, h.app.client, work) {
+		return
+	}
+
+	result, err := h.doSyncAll(r.Context(), userID)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
+		return
+	}
+	writeJSON(w, r, http.StatusOK, result)
 }
 
 func (h *handler) handleListFilters(w http.ResponseWriter, r *http.Request) {
