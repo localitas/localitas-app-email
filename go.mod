@@ -1,6 +1,6 @@
 module github.com/localitas/localitas-app-email
 
-go 1.26.3
+go 1.26.5
 
 require (
 	github.com/emersion/go-imap v1.2.1
