@@ -10,7 +10,22 @@ import (
 	"time"
 )
 
+// httpClient is a single pooled client shared across attachment save/get and the
+// antivirus scan, created once instead of per attachment (saveEmailAttachments
+// loops over every attachment of every synced email). No hard Timeout; each call
+// bounds itself with a context deadline so save/get and scan keep their own
+// limits while sharing the connection pool. http.Client is concurrency-safe.
+var httpClient = &http.Client{}
+
+const (
+	attachmentIOTimeout   = 30 * time.Second
+	attachmentScanTimeout = 60 * time.Second
+	oauthTimeout          = 10 * time.Second
+)
+
 func SaveAttachmentToManagedFS(ctx context.Context, coreURL, token, emailID, filename string, data []byte) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, attachmentIOTimeout)
+	defer cancel()
 	storagePath := fmt.Sprintf("email-attachments/%s/%s", emailID, filename)
 	webdavURL := fmt.Sprintf("%s/apps/filesystem/webdav/managed/%s", coreURL, url.PathEscape(storagePath))
 
@@ -19,8 +34,7 @@ func SaveAttachmentToManagedFS(ctx context.Context, coreURL, token, emailID, fil
 	if token != "" {
 		mkReq.Header.Set("Authorization", "Bearer "+token)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	mkResp, _ := client.Do(mkReq)
+	mkResp, _ := httpClient.Do(mkReq)
 	if mkResp != nil {
 		mkResp.Body.Close()
 	}
@@ -34,7 +48,7 @@ func SaveAttachmentToManagedFS(ctx context.Context, coreURL, token, emailID, fil
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("webdav put failed: %w", err)
 	}
@@ -49,6 +63,8 @@ func SaveAttachmentToManagedFS(ctx context.Context, coreURL, token, emailID, fil
 }
 
 func GetAttachmentFromManagedFS(ctx context.Context, coreURL, token, storagePath string) ([]byte, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, attachmentIOTimeout)
+	defer cancel()
 	webdavURL := fmt.Sprintf("%s/apps/filesystem/webdav/managed/%s", coreURL, url.PathEscape(storagePath))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", webdavURL, nil)
@@ -59,8 +75,7 @@ func GetAttachmentFromManagedFS(ctx context.Context, coreURL, token, storagePath
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, "", err
 	}

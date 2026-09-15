@@ -805,6 +805,8 @@ func saveEmailAttachments(ctx context.Context, store *Store, cfg *SyncConfig, ac
 }
 
 func scanAttachment(ctx context.Context, cfg *SyncConfig, att attachmentData) bool {
+	ctx, cancel := context.WithTimeout(ctx, attachmentScanTimeout)
+	defer cancel()
 	scanURL := cfg.CoreURL + "/apps/ext/antivirus/api/scan"
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
@@ -824,8 +826,7 @@ func scanAttachment(ctx context.Context, cfg *SyncConfig, att attachmentData) bo
 		req.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
 	}
 
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		logger.Warn("antivirus scan unavailable", "filename", att.Filename, "error", err)
 		return false

@@ -46,13 +46,15 @@ func ExchangeGoogleCode(ctx context.Context, code, clientID, clientSecret, redir
 		"redirect_uri":  {redirectURI},
 		"grant_type":    {"authorization_code"},
 	}
+	ctx, cancel := context.WithTimeout(ctx, oauthTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "POST", googleTokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -76,13 +78,15 @@ func RefreshGoogleToken(ctx context.Context, refreshToken, clientID, clientSecre
 		"client_secret": {clientSecret},
 		"grant_type":    {"refresh_token"},
 	}
+	ctx, cancel := context.WithTimeout(ctx, oauthTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "POST", googleTokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
