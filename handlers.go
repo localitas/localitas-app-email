@@ -51,6 +51,7 @@ func (h *handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var seededRefreshToken string
 	if req.VaultCredentialID != "" && h.app.client != nil {
 		secrets, err := h.app.client.WithToken(client.TokenFromRequest(r)).VaultGetSecrets(r.Context(), req.VaultCredentialID)
 		if err != nil {
@@ -86,6 +87,10 @@ func (h *handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		if req.OAuthClientSecret == "" {
 			req.OAuthClientSecret = secrets["oauth_client_secret"]
 		}
+		// A vault credential may carry a pre-provisioned refresh_token (dev seed /
+		// headless provisioning). Persist it below so the account is usable without
+		// the interactive OAuth "Connect" flow after a data wipe.
+		seededRefreshToken = secrets["refresh_token"]
 	}
 
 	if req.Email == "" {
@@ -126,6 +131,15 @@ func (h *handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
+	}
+	// Persist a pre-provisioned refresh token (from the vault credential) so the
+	// account works immediately without the interactive OAuth flow. expiresIn=0
+	// forces a refresh on first use, which mints a fresh access token.
+	if seededRefreshToken != "" {
+		if err := h.app.Store.SaveOAuthTokens(r.Context(), account.ID, "", seededRefreshToken, 0); err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "account created but failed to save seeded token: %v", err)
+			return
+		}
 	}
 	writeJSON(w, r, http.StatusCreated, account)
 }
