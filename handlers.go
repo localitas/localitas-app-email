@@ -2,8 +2,11 @@ package email
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"strconv"
@@ -173,7 +176,10 @@ func (h *handler) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	h.app.Store.DeleteAccount(r.Context(), id)
+	if err := h.app.Store.DeleteAccount(r.Context(), id); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
+		return
+	}
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
@@ -256,7 +262,7 @@ func (h *handler) handleSync(w http.ResponseWriter, r *http.Request) {
 	var err error
 	account, err = h.app.Store.GetAccount(r.Context(), accountID)
 	if err != nil {
-		writeErr(w, r, http.StatusNotFound, "account not found")
+		writeAccountErr(w, r, err)
 		return
 	}
 	if account.NeedsOAuth() {
@@ -286,7 +292,7 @@ func (h *handler) handleSyncFolder(w http.ResponseWriter, r *http.Request) {
 	var account *Account
 	account, err = h.app.Store.GetAccount(r.Context(), folder.AccountID)
 	if err != nil {
-		writeErr(w, r, http.StatusNotFound, "account not found")
+		writeAccountErr(w, r, err)
 		return
 	}
 	if account.NeedsOAuth() {
@@ -316,7 +322,7 @@ func (h *handler) handleDeleteEmail(w http.ResponseWriter, r *http.Request) {
 
 	account, err := h.app.Store.GetAccount(ctx, accountID)
 	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "account not found: %v", err)
+		writeAccountErr(w, r, err)
 		return
 	}
 	if account.NeedsOAuth() {
@@ -416,7 +422,7 @@ func (h *handler) handleCompose(w http.ResponseWriter, r *http.Request) {
 	var err error
 	account, err = h.app.Store.GetAccount(r.Context(), req.AccountID)
 	if err != nil {
-		writeErr(w, r, http.StatusNotFound, "account not found")
+		writeAccountErr(w, r, err)
 		return
 	}
 	if account.NeedsOAuth() {
@@ -458,7 +464,7 @@ func (h *handler) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	accountID := r.PathValue("id")
 	account, err := h.app.Store.GetAccount(r.Context(), accountID)
 	if err != nil {
-		writeErr(w, r, http.StatusNotFound, "account not found")
+		writeAccountErr(w, r, err)
 		return
 	}
 	if account.OAuthClientID == "" {
@@ -477,26 +483,28 @@ func (h *handler) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "missing code or state")
 		return
 	}
-	account, err := h.app.Store.GetAccount(r.Context(), accountID)
+	// Load WITH tokens: when Google omits refresh_token on re-consent, the
+	// stored one is kept instead of being overwritten with "".
+	account, err := h.app.Store.GetAccountWithTokens(r.Context(), accountID)
 	if err != nil {
-		writeErr(w, r, http.StatusNotFound, "account not found")
+		writeAccountErr(w, r, err)
 		return
 	}
 	redirectURI := h.oauthRedirectURI(r)
 	tok, err := ExchangeGoogleCode(r.Context(), code, account.OAuthClientID, account.OAuthClientSecret, redirectURI)
 	if err != nil {
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprintf(w, `<html><body><h3>Authorization Failed</h3><p>%s</p><script>setTimeout(function(){window.close();},3000);</script></body></html>`, err.Error())
+		writeOAuthPage(w, "Authorization Failed", err.Error(), 3000)
 		return
 	}
 	refreshToken := tok.RefreshToken
 	if refreshToken == "" {
 		refreshToken = account.RefreshToken
 	}
-	h.app.Store.SaveOAuthTokens(r.Context(), accountID, tok.AccessToken, refreshToken, tok.ExpiresIn)
-
-	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprintf(w, `<html><body><h3>Gmail Connected!</h3><p>You can close this window.</p><script>setTimeout(function(){window.close();},2000);</script></body></html>`)
+	if err := h.app.Store.SaveOAuthTokens(r.Context(), accountID, tok.AccessToken, refreshToken, tok.ExpiresIn); err != nil {
+		writeOAuthPage(w, "Authorization Failed", "could not save tokens: "+err.Error(), 3000)
+		return
+	}
+	writeOAuthPage(w, "Gmail Connected!", "You can close this window.", 2000)
 }
 
 func (h *handler) handleGetThread(w http.ResponseWriter, r *http.Request) {
@@ -640,14 +648,17 @@ func (h *handler) handleUnsubscribe(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if strings.HasPrefix(e.UnsubscribeURL, "mailto:") {
 		addr := strings.TrimPrefix(e.UnsubscribeURL, "mailto:")
-		account, err := h.app.Store.GetAccount(ctx, e.AccountID)
-		if err == nil {
-			if account.NeedsOAuth() {
-				account, _ = h.app.Store.GetAccountWithTokens(ctx, e.AccountID)
-				EnsureValidToken(ctx, h.app.Store, account)
+		account, err := h.app.Store.GetAccountWithTokens(ctx, e.AccountID)
+		switch {
+		case err != nil:
+			unsubErr = "load account: " + err.Error()
+		case account.NeedsOAuth():
+			if err := EnsureValidToken(ctx, h.app.Store, account); err != nil {
+				unsubErr = "oauth: " + err.Error()
 			}
-			sendErr := SendEmailWithAttachments(account, []string{addr}, nil, nil, "Unsubscribe", "Unsubscribe", "", "", nil)
-			if sendErr != nil {
+		}
+		if unsubErr == "" {
+			if sendErr := SendEmailWithAttachments(account, []string{addr}, nil, nil, "Unsubscribe", "Unsubscribe", "", "", nil); sendErr != nil {
 				unsubErr = sendErr.Error()
 			}
 		}
@@ -808,6 +819,24 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, v interface{}
 
 func writeErr(w http.ResponseWriter, r *http.Request, status int, format string, args ...interface{}) {
 	httputil.WriteError(w, r, status, format, args...)
+}
+
+// writeAccountErr reports a failed account load: 404 only when the account
+// doesn't exist. Any other error (e.g. a secret that can't be decrypted) is a
+// 500 carrying the real cause, never disguised as "account not found".
+func writeAccountErr(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, r, http.StatusNotFound, "account not found")
+		return
+	}
+	writeErr(w, r, http.StatusInternalServerError, "load account: %v", err)
+}
+
+// writeOAuthPage renders the small popup page the OAuth flow lands on.
+func writeOAuthPage(w http.ResponseWriter, title, message string, closeAfterMs int) {
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprintf(w, `<html><body><h3>%s</h3><p>%s</p><script>setTimeout(function(){window.close();},%d);</script></body></html>`,
+		html.EscapeString(title), html.EscapeString(message), closeAfterMs)
 }
 
 func intParam(r *http.Request, key string, def int) int {

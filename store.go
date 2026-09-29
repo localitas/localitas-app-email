@@ -42,9 +42,15 @@ func (s *Store) CreateAccount(ctx context.Context, userID, name, email, provider
 	if provider == "" {
 		provider = "imap"
 	}
-	encPass, _ := client.Encrypt(password)
-	encSecret, _ := client.Encrypt(oauthClientSecret)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO accounts (id, user_id, name, email, provider, imap_host, imap_port, smtp_host, smtp_port, username, password, oauth_client_id, oauth_client_secret, use_tls, vault_credential_id, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+	encPass, err := client.Encrypt(password)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt password: %w", err)
+	}
+	encSecret, err := client.Encrypt(oauthClientSecret)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt oauth_client_secret: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO accounts (id, user_id, name, email, provider, imap_host, imap_port, smtp_host, smtp_port, username, password, oauth_client_id, oauth_client_secret, use_tls, vault_credential_id, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
 		id, userID, name, email, provider, imapHost, imapPort, smtpHost, smtpPort, username, encPass, oauthClientID, encSecret, tls, vaultCredentialID, now, now)
 	if err != nil {
 		return nil, err
@@ -117,8 +123,12 @@ func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
 	a.LastSyncedAt = lastSynced
 	a.CreatedAt = time.Unix(createdAt, 0)
 	a.UpdatedAt = time.Unix(updatedAt, 0)
-	a.Password, _ = client.Decrypt(a.Password)
-	a.OAuthClientSecret, _ = client.Decrypt(a.OAuthClientSecret)
+	if a.Password, err = client.Decrypt(a.Password); err != nil {
+		return nil, fmt.Errorf("decrypt password: %w", err)
+	}
+	if a.OAuthClientSecret, err = client.Decrypt(a.OAuthClientSecret); err != nil {
+		return nil, fmt.Errorf("decrypt oauth_client_secret: %w", err)
+	}
 	return &a, nil
 }
 
@@ -131,17 +141,50 @@ func (s *Store) UpdateAccount(ctx context.Context, id, name, email, provider, im
 	if provider == "" {
 		provider = "imap"
 	}
-	encPass, _ := client.Encrypt(password)
-	encSecret, _ := client.Encrypt(oauthClientSecret)
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE accounts SET name=?, email=?, provider=?, imap_host=?, imap_port=?, smtp_host=?, smtp_port=?, username=?, password=?, oauth_client_id=?, oauth_client_secret=?, use_tls=?, updated_at=? WHERE id=?`,
-		name, email, provider, imapHost, imapPort, smtpHost, smtpPort, username, encPass, oauthClientID, encSecret, tls, now, id)
-	return err
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE accounts SET name=?, email=?, provider=?, imap_host=?, imap_port=?, smtp_host=?, smtp_port=?, username=?, oauth_client_id=?, use_tls=?, updated_at=? WHERE id=?`,
+		name, email, provider, imapHost, imapPort, smtpHost, smtpPort, username, oauthClientID, tls, now, id); err != nil {
+		return err
+	}
+	// An update that omits a secret keeps the stored one; writing Encrypt("")
+	// would silently blank it.
+	if password != "" {
+		encPass, err := client.Encrypt(password)
+		if err != nil {
+			return fmt.Errorf("encrypt password: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE accounts SET password=? WHERE id=?`, encPass, id); err != nil {
+			return err
+		}
+	}
+	if oauthClientSecret != "" {
+		encSecret, err := client.Encrypt(oauthClientSecret)
+		if err != nil {
+			return fmt.Errorf("encrypt oauth_client_secret: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE accounts SET oauth_client_secret=? WHERE id=?`, encSecret, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
+// DeleteAccount removes an account and everything that belongs to it. The
+// schema's ON DELETE CASCADE clauses are not relied on: SQLite only enforces
+// foreign keys on connections with PRAGMA foreign_keys=ON, so without explicit
+// deletes the account's mail would be orphaned and keep appearing in search.
+// Deleting emails fires the emails_ad trigger, keeping the FTS index in sync.
 func (s *Store) DeleteAccount(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM accounts WHERE id = ?", id)
-	return err
+	for _, table := range []string{"attachments", "drafts", "filters", "emails", "folders", "accounts"} {
+		column := "account_id"
+		if table == "accounts" {
+			column = "id"
+		}
+		if _, err := s.db.ExecContext(ctx, "DELETE FROM "+table+" WHERE "+column+" = ?", id); err != nil {
+			return fmt.Errorf("delete %s for account %s: %w", table, id, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) UpdateSyncStatus(ctx context.Context, id string, syncErr string) {
