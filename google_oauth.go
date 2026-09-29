@@ -106,9 +106,15 @@ func RefreshGoogleToken(ctx context.Context, refreshToken, clientID, clientSecre
 func (s *Store) SaveOAuthTokens(ctx context.Context, accountID, accessToken, refreshToken string, expiresIn int) error {
 	now := time.Now().UTC().Unix()
 	expiry := now + int64(expiresIn)
-	encAccess, _ := client.Encrypt(accessToken)
-	encRefresh, _ := client.Encrypt(refreshToken)
-	_, err := s.db.ExecContext(ctx,
+	encAccess, err := client.Encrypt(accessToken)
+	if err != nil {
+		return fmt.Errorf("encrypt access_token: %w", err)
+	}
+	encRefresh, err := client.Encrypt(refreshToken)
+	if err != nil {
+		return fmt.Errorf("encrypt refresh_token: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx,
 		"UPDATE accounts SET access_token = ?, refresh_token = ?, token_expiry = ?, updated_at = ? WHERE id = ?",
 		encAccess, encRefresh, expiry, now, accountID)
 	return err
@@ -121,10 +127,16 @@ func (s *Store) GetAccountWithTokens(ctx context.Context, id string) (*Account, 
 	}
 	var accessToken, refreshToken string
 	var tokenExpiry int64
-	s.db.QueryRowContext(ctx, "SELECT COALESCE(access_token,''), COALESCE(refresh_token,''), COALESCE(token_expiry,0) FROM accounts WHERE id = ?", id).
-		Scan(&accessToken, &refreshToken, &tokenExpiry)
-	a.AccessToken, _ = client.Decrypt(accessToken)
-	a.RefreshToken, _ = client.Decrypt(refreshToken)
+	if err := s.db.QueryRowContext(ctx, "SELECT COALESCE(access_token,''), COALESCE(refresh_token,''), COALESCE(token_expiry,0) FROM accounts WHERE id = ?", id).
+		Scan(&accessToken, &refreshToken, &tokenExpiry); err != nil {
+		return nil, fmt.Errorf("read tokens: %w", err)
+	}
+	if a.AccessToken, err = client.Decrypt(accessToken); err != nil {
+		return nil, fmt.Errorf("decrypt access_token: %w", err)
+	}
+	if a.RefreshToken, err = client.Decrypt(refreshToken); err != nil {
+		return nil, fmt.Errorf("decrypt refresh_token: %w", err)
+	}
 	a.TokenExpiry = tokenExpiry
 	return a, nil
 }
