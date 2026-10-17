@@ -33,7 +33,7 @@ func main() {
 	app := &cli.Command{
 		Name:    "email-server",
 		Usage:   "Email app server",
-		Version: version,
+		Version: version + " (" + commit + ")",
 		Commands: []*cli.Command{
 			serveCommand(),
 			migrateCommand(),
