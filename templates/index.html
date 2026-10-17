@@ -671,20 +671,6 @@
                 document.getElementById('reader-delete-btn').style.display = viewingTrash ? 'none' : '';
                 document.getElementById('reader-restore-btn').style.display = viewingTrash ? '' : 'none';
                 var hasUnsub = !!e.unsubscribe_url;
-                if (!hasUnsub && e.body_html) {
-                    var tmp = document.createElement('div');
-                    tmp.innerHTML = e.body_html;
-                    var links = tmp.querySelectorAll('a[href]');
-                    for (var li = 0; li < links.length; li++) {
-                        var href = (links[li].getAttribute('href') || '').toLowerCase();
-                        var text = (links[li].textContent || '').toLowerCase();
-                        if (href.indexOf('unsubscribe') >= 0 || text.indexOf('unsubscribe') >= 0) {
-                            e.unsubscribe_url = links[li].getAttribute('href');
-                            hasUnsub = true;
-                            break;
-                        }
-                    }
-                }
                 document.getElementById('reader-unsub-btn').style.display = (hasUnsub && !viewingTrash) ? '' : 'none';
                 loadAttachments(id);
                 document.getElementById('reader-overlay').classList.add('open');
@@ -1027,11 +1013,7 @@
             var confirmed = await window.confirmModal.show({title:'Unsubscribe', message:'Unsubscribe from this sender and delete this email?', confirmText:'Unsubscribe', confirmClass:'btn-danger'});
             if (!confirmed) return;
             try {
-                var body = {};
-                if (currentEmailData && currentEmailData.unsubscribe_url) {
-                    body.url = currentEmailData.unsubscribe_url;
-                }
-                var resp = await fetch('api/emails/' + currentEmailID + '/unsubscribe', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+                var resp = await fetch('api/emails/' + currentEmailID + '/unsubscribe', {method:'POST'});
                 var result = await resp.json();
                 if (result.error) { alert('Unsubscribe failed: ' + result.error); return; }
             } catch(e) { alert('Unsubscribe failed: ' + e.message); return; }

@@ -2,7 +2,6 @@ package email
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,24 +10,33 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/localitas/localitas-go"
 	"github.com/localitas/localitas-go/httputil"
 )
 
+const unsubscribeTimeout = 15 * time.Second
+
 type handler struct {
 	app *App
 }
 
+func userID(r *http.Request) string {
+	return client.GetUserID(r.Context())
+}
+
 func (h *handler) handleListAccounts(w http.ResponseWriter, r *http.Request) {
-	userID := client.UserIDFromRequest(r)
-	accounts, err := h.app.Store.ListAccounts(r.Context(), userID)
+	accounts, err := h.app.Store.ListAccounts(r.Context(), userID(r))
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
 	}
 	for _, a := range accounts {
-		a.UnreadCount = h.app.Store.GetAccountUnreadCount(r.Context(), a.ID)
+		if a.UnreadCount, err = h.app.Store.GetAccountUnreadCount(r.Context(), a.ID); err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "count unread for account %s: %v", a.ID, err)
+			return
+		}
 	}
 	writeJSON(w, r, http.StatusOK, accounts)
 }
@@ -129,8 +137,7 @@ func (h *handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	if req.Provider == "" {
 		req.Provider = "imap"
 	}
-	userID := client.UserIDFromRequest(r)
-	account, err := h.app.Store.CreateAccount(r.Context(), userID, req.Name, req.Email, req.Provider, req.IMAPHost, req.IMAPPort, req.SMTPHost, req.SMTPPort, req.Username, req.Password, req.OAuthClientID, req.OAuthClientSecret, req.UseTLS, req.VaultCredentialID)
+	account, err := h.app.Store.CreateAccount(r.Context(), userID(r), req.Name, req.Email, req.Provider, req.IMAPHost, req.IMAPPort, req.SMTPHost, req.SMTPPort, req.Username, req.Password, req.OAuthClientID, req.OAuthClientSecret, req.UseTLS, req.VaultCredentialID)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
@@ -139,7 +146,7 @@ func (h *handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	// account works immediately without the interactive OAuth flow. expiresIn=0
 	// forces a refresh on first use, which mints a fresh access token.
 	if seededRefreshToken != "" {
-		if err := h.app.Store.SaveOAuthTokens(r.Context(), account.ID, "", seededRefreshToken, 0); err != nil {
+		if err := h.app.Store.SaveOAuthTokens(r.Context(), account.UserID, account.ID, "", seededRefreshToken, 0); err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "account created but failed to save seeded token: %v", err)
 			return
 		}
@@ -167,17 +174,16 @@ func (h *handler) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "invalid body")
 		return
 	}
-	if err := h.app.Store.UpdateAccount(r.Context(), id, req.Name, req.Email, req.Provider, req.IMAPHost, req.IMAPPort, req.SMTPHost, req.SMTPPort, req.Username, req.Password, req.OAuthClientID, req.OAuthClientSecret, req.UseTLS); err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "%v", err)
+	if err := h.app.Store.UpdateAccount(r.Context(), userID(r), id, req.Name, req.Email, req.Provider, req.IMAPHost, req.IMAPPort, req.SMTPHost, req.SMTPPort, req.Username, req.Password, req.OAuthClientID, req.OAuthClientSecret, req.UseTLS); err != nil {
+		writeStoreErr(w, r, err)
 		return
 	}
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if err := h.app.Store.DeleteAccount(r.Context(), id); err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "%v", err)
+	if err := h.app.Store.DeleteAccount(r.Context(), userID(r), r.PathValue("id")); err != nil {
+		writeStoreErr(w, r, err)
 		return
 	}
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
@@ -189,7 +195,11 @@ func (h *handler) handleListFolders(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "account_id is required")
 		return
 	}
-	folders, err := h.app.Store.ListFolders(r.Context(), accountID)
+	if err := h.app.Store.RequireAccount(r.Context(), userID(r), accountID); err != nil {
+		writeStoreErr(w, r, err)
+		return
+	}
+	folders, err := h.app.Store.ListFolders(r.Context(), userID(r), accountID)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
@@ -203,9 +213,11 @@ func (h *handler) handleListEmails(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "folder_id is required")
 		return
 	}
-	limit := intParam(r, "limit", 50)
-	offset := intParam(r, "offset", 0)
-	emails, err := h.app.Store.ListEmails(r.Context(), folderID, limit, offset)
+	if _, err := h.app.Store.GetFolderByID(r.Context(), userID(r), folderID); err != nil {
+		writeStoreErr(w, r, err)
+		return
+	}
+	emails, err := h.app.Store.ListEmails(r.Context(), userID(r), folderID, intParam(r, "limit", 50), intParam(r, "offset", 0))
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
@@ -215,24 +227,31 @@ func (h *handler) handleListEmails(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) handleGetEmail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	e, err := h.app.Store.GetEmail(r.Context(), id)
+	e, err := h.app.Store.GetEmail(r.Context(), userID(r), id)
 	if err != nil {
-		writeErr(w, r, http.StatusNotFound, "email not found")
+		writeStoreErr(w, r, err)
 		return
 	}
-	h.app.Store.MarkRead(r.Context(), id)
+	if err := h.app.Store.MarkRead(r.Context(), userID(r), id); err != nil {
+		writeStoreErr(w, r, err)
+		return
+	}
 	writeJSON(w, r, http.StatusOK, e)
 }
 
 func (h *handler) handleMarkUnread(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	h.app.Store.MarkUnread(r.Context(), id)
+	if err := h.app.Store.MarkUnread(r.Context(), userID(r), r.PathValue("id")); err != nil {
+		writeStoreErr(w, r, err)
+		return
+	}
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleToggleStar(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	h.app.Store.ToggleStar(r.Context(), id)
+	if err := h.app.Store.ToggleStar(r.Context(), userID(r), r.PathValue("id")); err != nil {
+		writeStoreErr(w, r, err)
+		return
+	}
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
@@ -245,9 +264,9 @@ func (h *handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	var emails []*Email
 	var err error
 	if r.URL.Query().Get("trash") == "1" {
-		emails, err = h.app.Store.SearchDeletedEmails(r.Context(), q, 20)
+		emails, err = h.app.Store.SearchDeletedEmails(r.Context(), userID(r), q, 20)
 	} else {
-		emails, err = h.app.Store.SearchEmails(r.Context(), q, 20)
+		emails, err = h.app.Store.SearchEmails(r.Context(), userID(r), q, 20)
 	}
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "%v", err)
@@ -256,53 +275,63 @@ func (h *handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, http.StatusOK, emails)
 }
 
+// loadAccount returns userID's account id, with its OAuth tokens when it
+// signs in with OAuth.
+func (h *handler) loadAccount(ctx context.Context, userID, id string) (*Account, error) {
+	account, err := h.app.Store.GetAccount(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	if !account.NeedsOAuth() {
+		return account, nil
+	}
+	return h.app.Store.GetAccountWithTokens(ctx, userID, id)
+}
+
+func (h *handler) syncConfig() *SyncConfig {
+	return &SyncConfig{CoreURL: h.app.CoreURL, AuthToken: h.app.AuthToken}
+}
+
+// recordSync stores the outcome of syncing an account; a failure to record
+// it is logged, since the sync itself has already happened.
+func (h *handler) recordSync(ctx context.Context, accountID string, syncErr error) {
+	msg := ""
+	if syncErr != nil {
+		msg = syncErr.Error()
+	}
+	if err := h.app.Store.UpdateSyncStatus(ctx, accountID, msg); err != nil {
+		logger.Error("failed to record sync status", "account_id", accountID, "error", err)
+	}
+}
+
 func (h *handler) handleSync(w http.ResponseWriter, r *http.Request) {
 	accountID := r.PathValue("id")
-	var account *Account
-	var err error
-	account, err = h.app.Store.GetAccount(r.Context(), accountID)
+	account, err := h.loadAccount(r.Context(), userID(r), accountID)
 	if err != nil {
-		writeAccountErr(w, r, err)
+		writeStoreErr(w, r, err)
 		return
 	}
-	if account.NeedsOAuth() {
-		account, err = h.app.Store.GetAccountWithTokens(r.Context(), accountID)
-		if err != nil {
-			writeErr(w, r, http.StatusInternalServerError, "get tokens: %v", err)
-			return
-		}
-	}
-	result, err := SyncAccount(r.Context(), h.app.Store, account, 200, &SyncConfig{CoreURL: h.app.CoreURL, AuthToken: h.app.AuthToken})
+	result, err := SyncAccount(r.Context(), h.app.Store, account, 200, h.syncConfig())
+	h.recordSync(r.Context(), accountID, err)
 	if err != nil {
-		h.app.Store.UpdateSyncStatus(r.Context(), accountID, err.Error())
 		writeErr(w, r, http.StatusInternalServerError, "sync failed: %v", err)
 		return
 	}
-	h.app.Store.UpdateSyncStatus(r.Context(), accountID, "")
 	writeJSON(w, r, http.StatusOK, result)
 }
 
 func (h *handler) handleSyncFolder(w http.ResponseWriter, r *http.Request) {
-	folderID := r.PathValue("id")
-	folder, err := h.app.Store.GetFolderByID(r.Context(), folderID)
+	folder, err := h.app.Store.GetFolderByID(r.Context(), userID(r), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, r, http.StatusNotFound, "folder not found")
+		writeStoreErr(w, r, err)
 		return
 	}
-	var account *Account
-	account, err = h.app.Store.GetAccount(r.Context(), folder.AccountID)
+	account, err := h.loadAccount(r.Context(), userID(r), folder.AccountID)
 	if err != nil {
-		writeAccountErr(w, r, err)
+		writeStoreErr(w, r, err)
 		return
 	}
-	if account.NeedsOAuth() {
-		account, err = h.app.Store.GetAccountWithTokens(r.Context(), folder.AccountID)
-		if err != nil {
-			writeErr(w, r, http.StatusInternalServerError, "get tokens: %v", err)
-			return
-		}
-	}
-	result, err := SyncSingleFolder(r.Context(), h.app.Store, account, folder, 200, &SyncConfig{CoreURL: h.app.CoreURL, AuthToken: h.app.AuthToken})
+	result, err := SyncSingleFolder(r.Context(), h.app.Store, account, folder, 200, h.syncConfig())
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "sync failed: %v", err)
 		return
@@ -314,51 +343,39 @@ func (h *handler) handleDeleteEmail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ctx := r.Context()
 
-	accountID, folderID, uid, err := h.app.Store.GetEmailUID(ctx, id)
+	accountID, folderID, uid, err := h.app.Store.GetEmailUID(ctx, userID(r), id)
 	if err != nil {
-		writeErr(w, r, http.StatusNotFound, "email not found")
+		writeStoreErr(w, r, err)
 		return
 	}
-
-	account, err := h.app.Store.GetAccount(ctx, accountID)
+	account, err := h.loadAccount(ctx, userID(r), accountID)
 	if err != nil {
-		writeAccountErr(w, r, err)
+		writeStoreErr(w, r, err)
 		return
 	}
-	if account.NeedsOAuth() {
-		account, err = h.app.Store.GetAccountWithTokens(ctx, accountID)
-		if err != nil {
-			writeErr(w, r, http.StatusInternalServerError, "get tokens: %v", err)
-			return
-		}
-		if err := EnsureValidToken(ctx, h.app.Store, account); err != nil {
-			writeErr(w, r, http.StatusInternalServerError, "oauth: %v", err)
-			return
-		}
-	}
-
-	folderRemote, err := h.app.Store.GetFolderRemoteName(ctx, folderID)
-	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "folder not found: %v", err)
+	if err := EnsureValidToken(ctx, h.app.Store, account); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "oauth: %v", err)
 		return
 	}
-
+	folderRemote, err := h.app.Store.GetFolderRemoteName(ctx, accountID, folderID)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "folder of email %s: %v", id, err)
+		return
+	}
 	if err := MoveToTrash(account, folderRemote, uid); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "IMAP delete failed: %v", err)
 		return
 	}
-
-	if err := h.app.Store.SoftDelete(ctx, id); err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "%v", err)
+	if err := h.app.Store.SoftDelete(ctx, userID(r), id); err != nil {
+		writeStoreErr(w, r, err)
 		return
 	}
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleRestoreEmail(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if err := h.app.Store.RestoreEmail(r.Context(), id); err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "%v", err)
+	if err := h.app.Store.RestoreEmail(r.Context(), userID(r), r.PathValue("id")); err != nil {
+		writeStoreErr(w, r, err)
 		return
 	}
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
@@ -366,9 +383,13 @@ func (h *handler) handleRestoreEmail(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) handleListTrash(w http.ResponseWriter, r *http.Request) {
 	accountID := r.URL.Query().Get("account_id")
-	limit := intParam(r, "limit", 50)
-	offset := intParam(r, "offset", 0)
-	emails, err := h.app.Store.ListDeletedEmails(r.Context(), accountID, limit, offset)
+	if accountID != "" {
+		if err := h.app.Store.RequireAccount(r.Context(), userID(r), accountID); err != nil {
+			writeStoreErr(w, r, err)
+			return
+		}
+	}
+	emails, err := h.app.Store.ListDeletedEmails(r.Context(), userID(r), accountID, intParam(r, "limit", 50), intParam(r, "offset", 0))
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
@@ -382,7 +403,10 @@ func (h *handler) handleCompose(w http.ResponseWriter, r *http.Request) {
 
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
-		r.ParseMultipartForm(32 << 20)
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			writeErr(w, r, http.StatusBadRequest, "invalid form: %v", err)
+			return
+		}
 		req.AccountID = r.FormValue("account_id")
 		req.To = splitComma(r.FormValue("to"))
 		req.Cc = splitComma(r.FormValue("cc"))
@@ -392,14 +416,18 @@ func (h *handler) handleCompose(w http.ResponseWriter, r *http.Request) {
 		req.BodyHTML = r.FormValue("body_html")
 		req.InReplyTo = r.FormValue("in_reply_to")
 
-		files := r.MultipartForm.File["attachments"]
-		for _, fh := range files {
+		for _, fh := range r.MultipartForm.File["attachments"] {
 			f, err := fh.Open()
 			if err != nil {
-				continue
+				writeErr(w, r, http.StatusBadRequest, "attachment %s: %v", fh.Filename, err)
+				return
 			}
-			data, _ := io.ReadAll(f)
+			data, err := io.ReadAll(f)
 			f.Close()
+			if err != nil {
+				writeErr(w, r, http.StatusBadRequest, "attachment %s: %v", fh.Filename, err)
+				return
+			}
 			attachFiles = append(attachFiles, AttachmentFile{
 				Filename:    fh.Filename,
 				ContentType: fh.Header.Get("Content-Type"),
@@ -418,30 +446,19 @@ func (h *handler) handleCompose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var account *Account
-	var err error
-	account, err = h.app.Store.GetAccount(r.Context(), req.AccountID)
+	account, err := h.loadAccount(r.Context(), userID(r), req.AccountID)
 	if err != nil {
-		writeAccountErr(w, r, err)
+		writeStoreErr(w, r, err)
 		return
 	}
-	if account.NeedsOAuth() {
-		account, err = h.app.Store.GetAccountWithTokens(r.Context(), req.AccountID)
-		if err != nil {
-			writeErr(w, r, http.StatusInternalServerError, "get tokens: %v", err)
-			return
-		}
-		if err := EnsureValidToken(r.Context(), h.app.Store, account); err != nil {
-			writeErr(w, r, http.StatusInternalServerError, "oauth: %v", err)
-			return
-		}
+	if err := EnsureValidToken(r.Context(), h.app.Store, account); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "oauth: %v", err)
+		return
 	}
-
 	if err := SendEmailWithAttachments(account, req.To, req.Cc, req.Bcc, req.Subject, req.Body, req.BodyHTML, req.InReplyTo, attachFiles); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "send failed: %v", err)
 		return
 	}
-
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
@@ -462,36 +479,53 @@ func (h *handler) oauthRedirectURI(r *http.Request) string {
 
 func (h *handler) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	accountID := r.PathValue("id")
-	account, err := h.app.Store.GetAccount(r.Context(), accountID)
+	account, err := h.app.Store.GetAccount(r.Context(), userID(r), accountID)
 	if err != nil {
-		writeAccountErr(w, r, err)
+		writeStoreErr(w, r, err)
 		return
 	}
 	if account.OAuthClientID == "" {
 		writeErr(w, r, http.StatusBadRequest, "no OAuth client ID configured")
 		return
 	}
+	state, err := sealOAuthState(userID(r), accountID)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "seal oauth state: %v", err)
+		return
+	}
 	redirectURI := h.oauthRedirectURI(r)
-	authURL := GoogleAuthRedirectURL(account.OAuthClientID, redirectURI, accountID)
+	authURL := GoogleAuthRedirectURL(account.OAuthClientID, redirectURI, state)
 	writeJSON(w, r, http.StatusOK, map[string]string{"auth_url": authURL, "redirect_uri": redirectURI})
 }
 
+// handleOAuthCallback completes a flow handleOAuthStart began. The state
+// names the user who started it and the account it authorizes; the callback
+// is refused unless the user completing it is that user and still owns the
+// account, so tokens can only land on the caller's own account.
 func (h *handler) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
-	accountID := r.URL.Query().Get("state")
-	if code == "" || accountID == "" {
+	state := r.URL.Query().Get("state")
+	if code == "" || state == "" {
 		writeErr(w, r, http.StatusBadRequest, "missing code or state")
+		return
+	}
+	stateUser, accountID, err := openOAuthState(state)
+	if err != nil {
+		writeErr(w, r, http.StatusBadRequest, "%v", err)
+		return
+	}
+	if stateUser != userID(r) {
+		writeStoreErr(w, r, ErrNotFound)
 		return
 	}
 	// Load WITH tokens: when Google omits refresh_token on re-consent, the
 	// stored one is kept instead of being overwritten with "".
-	account, err := h.app.Store.GetAccountWithTokens(r.Context(), accountID)
+	account, err := h.app.Store.GetAccountWithTokens(r.Context(), userID(r), accountID)
 	if err != nil {
-		writeAccountErr(w, r, err)
+		writeStoreErr(w, r, err)
 		return
 	}
-	redirectURI := h.oauthRedirectURI(r)
-	tok, err := ExchangeGoogleCode(r.Context(), code, account.OAuthClientID, account.OAuthClientSecret, redirectURI)
+	tok, err := ExchangeGoogleCode(r.Context(), code, account.OAuthClientID, account.OAuthClientSecret, h.oauthRedirectURI(r))
 	if err != nil {
 		writeOAuthPage(w, "Authorization Failed", err.Error(), 3000)
 		return
@@ -500,7 +534,7 @@ func (h *handler) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if refreshToken == "" {
 		refreshToken = account.RefreshToken
 	}
-	if err := h.app.Store.SaveOAuthTokens(r.Context(), accountID, tok.AccessToken, refreshToken, tok.ExpiresIn); err != nil {
+	if err := h.app.Store.SaveOAuthTokens(r.Context(), userID(r), accountID, tok.AccessToken, refreshToken, tok.ExpiresIn); err != nil {
 		writeOAuthPage(w, "Authorization Failed", "could not save tokens: "+err.Error(), 3000)
 		return
 	}
@@ -513,9 +547,13 @@ func (h *handler) handleGetThread(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "thread_id is required")
 		return
 	}
-	emails, err := h.app.Store.ListThreadEmails(r.Context(), threadID)
+	emails, err := h.app.Store.ListThreadEmails(r.Context(), userID(r), threadID)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "%v", err)
+		return
+	}
+	if len(emails) == 0 {
+		writeStoreErr(w, r, ErrNotFound)
 		return
 	}
 	writeJSON(w, r, http.StatusOK, emails)
@@ -523,7 +561,11 @@ func (h *handler) handleGetThread(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) handleListAttachments(w http.ResponseWriter, r *http.Request) {
 	emailID := r.PathValue("id")
-	attachments, err := h.app.Store.ListAttachments(r.Context(), emailID)
+	if _, err := h.app.Store.GetEmail(r.Context(), userID(r), emailID); err != nil {
+		writeStoreErr(w, r, err)
+		return
+	}
+	attachments, err := h.app.Store.ListAttachments(r.Context(), userID(r), emailID)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
@@ -532,12 +574,9 @@ func (h *handler) handleListAttachments(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *handler) handleDownloadAttachment(w http.ResponseWriter, r *http.Request) {
-	attachID := r.PathValue("aid")
-	var att Attachment
-	err := h.app.Store.db.QueryRowContext(r.Context(), "SELECT id, email_id, account_id, filename, content_type, size_bytes, storage_path, created_at FROM attachments WHERE id = ?", attachID).
-		Scan(&att.ID, &att.EmailID, &att.AccountID, &att.Filename, &att.ContentType, &att.SizeBytes, &att.StoragePath, &att.CreatedAt)
+	att, err := h.app.Store.GetAttachment(r.Context(), userID(r), r.PathValue("aid"))
 	if err != nil {
-		writeErr(w, r, http.StatusNotFound, "attachment not found")
+		writeStoreErr(w, r, err)
 		return
 	}
 	data, contentType, err := GetAttachmentFromManagedFS(r.Context(), h.app.CoreURL, h.app.AuthToken, att.StoragePath)
@@ -569,16 +608,20 @@ func (h *handler) handleSaveDraft(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "invalid body")
 		return
 	}
-	draft, err := h.app.Store.SaveDraft(r.Context(), req.ID, req.AccountID, req.ToAddresses, req.CcAddresses, req.BccAddresses, req.Subject, req.BodyText, req.BodyHTML, req.InReplyTo)
+	if req.AccountID == "" {
+		writeErr(w, r, http.StatusBadRequest, "account_id is required")
+		return
+	}
+	draft, err := h.app.Store.SaveDraft(r.Context(), userID(r), req.ID, req.AccountID, req.ToAddresses, req.CcAddresses, req.BccAddresses, req.Subject, req.BodyText, req.BodyHTML, req.InReplyTo)
 	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "%v", err)
+		writeStoreErr(w, r, err)
 		return
 	}
 	writeJSON(w, r, http.StatusOK, draft)
 }
 
 func (h *handler) handleListDrafts(w http.ResponseWriter, r *http.Request) {
-	drafts, err := h.app.Store.ListDrafts(r.Context())
+	drafts, err := h.app.Store.ListDrafts(r.Context(), userID(r))
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
@@ -587,18 +630,19 @@ func (h *handler) handleListDrafts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleGetDraft(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	draft, err := h.app.Store.GetDraft(r.Context(), id)
+	draft, err := h.app.Store.GetDraft(r.Context(), userID(r), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, r, http.StatusNotFound, "draft not found")
+		writeStoreErr(w, r, err)
 		return
 	}
 	writeJSON(w, r, http.StatusOK, draft)
 }
 
 func (h *handler) handleDeleteDraft(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	h.app.Store.DeleteDraft(r.Context(), id)
+	if err := h.app.Store.DeleteDraft(r.Context(), userID(r), r.PathValue("id")); err != nil {
+		writeStoreErr(w, r, err)
+		return
+	}
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
@@ -606,125 +650,130 @@ func (h *handler) handleListPresets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, http.StatusOK, Presets)
 }
 
+// handleUnsubscribe unsubscribes from the sender of the caller's email using
+// only the List-Unsubscribe target recorded when the email was synced. The
+// request body is never read: a caller-supplied URL would let any user make
+// the server fetch an arbitrary URL, or send mail from their account to an
+// arbitrary address.
 func (h *handler) handleUnsubscribe(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ctx := r.Context()
 
-	var req struct {
-		URL string `json:"url"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	e, err := h.app.Store.GetEmail(ctx, id)
+	e, err := h.app.Store.GetEmail(ctx, userID(r), id)
 	if err != nil {
-		writeErr(w, r, http.StatusNotFound, "email not found")
+		writeStoreErr(w, r, err)
 		return
 	}
-	if e.UnsubscribeURL == "" && req.URL != "" {
-		e.UnsubscribeURL = req.URL
-	}
-	if e.UnsubscribeURL == "" {
+	target := e.UnsubscribeURL
+	isHTTP := strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://")
+	isMailto := strings.HasPrefix(target, "mailto:")
+	if !isHTTP && !isMailto {
 		writeErr(w, r, http.StatusBadRequest, "no unsubscribe URL available")
 		return
 	}
 
-	unsubErr := ""
-	if e.UnsubscribePost && strings.HasPrefix(e.UnsubscribeURL, "http") {
-		req, _ := http.NewRequestWithContext(ctx, "POST", e.UnsubscribeURL, strings.NewReader("List-Unsubscribe=One-Click-Unsubscribe"))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			unsubErr = err.Error()
-		} else {
-			resp.Body.Close()
-		}
-	} else if strings.HasPrefix(e.UnsubscribeURL, "http") {
-		req, _ := http.NewRequestWithContext(ctx, "GET", e.UnsubscribeURL, nil)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			unsubErr = err.Error()
-		} else {
-			resp.Body.Close()
-		}
-	} else if strings.HasPrefix(e.UnsubscribeURL, "mailto:") {
-		addr := strings.TrimPrefix(e.UnsubscribeURL, "mailto:")
-		account, err := h.app.Store.GetAccountWithTokens(ctx, e.AccountID)
-		switch {
-		case err != nil:
-			unsubErr = "load account: " + err.Error()
-		case account.NeedsOAuth():
-			if err := EnsureValidToken(ctx, h.app.Store, account); err != nil {
-				unsubErr = "oauth: " + err.Error()
-			}
-		}
-		if unsubErr == "" {
-			if sendErr := SendEmailWithAttachments(account, []string{addr}, nil, nil, "Unsubscribe", "Unsubscribe", "", "", nil); sendErr != nil {
-				unsubErr = sendErr.Error()
-			}
-		}
+	if isHTTP {
+		err = unsubscribeHTTP(ctx, target, e.UnsubscribePost)
+	} else {
+		err = h.unsubscribeMailto(ctx, userID(r), e.AccountID, strings.TrimPrefix(target, "mailto:"))
 	}
-
-	if unsubErr != "" {
-		writeErr(w, r, http.StatusInternalServerError, "unsubscribe failed: %s", unsubErr)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "unsubscribe failed: %v", err)
 		return
 	}
-
-	h.app.Store.SoftDelete(ctx, id)
+	if err := h.app.Store.SoftDelete(ctx, userID(r), id); err != nil {
+		writeStoreErr(w, r, err)
+		return
+	}
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
-func (h *handler) doSyncAll(ctx context.Context, userID string) (map[string]interface{}, error) {
-	var accounts []*Account
+func unsubscribeHTTP(ctx context.Context, target string, oneClickPost bool) error {
+	ctx, cancel := context.WithTimeout(ctx, unsubscribeTimeout)
+	defer cancel()
+	var req *http.Request
 	var err error
-	if userID != "" {
-		accounts, err = h.app.Store.ListAccounts(ctx, userID)
+	if oneClickPost {
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader("List-Unsubscribe=One-Click-Unsubscribe"))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
 	} else {
-		accounts, err = h.app.Store.ListAllAccounts(ctx)
+		req, err = http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	}
+	if err != nil {
+		return err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+
+// unsubscribeMailto sends the unsubscribe request from the account the
+// email arrived in, which the caller owns.
+func (h *handler) unsubscribeMailto(ctx context.Context, userID, accountID, addr string) error {
+	account, err := h.loadAccount(ctx, userID, accountID)
+	if err != nil {
+		return fmt.Errorf("load account: %w", err)
+	}
+	if err := EnsureValidToken(ctx, h.app.Store, account); err != nil {
+		return fmt.Errorf("oauth: %w", err)
+	}
+	return SendEmailWithAttachments(account, []string{addr}, nil, nil, "Unsubscribe", "Unsubscribe", "", "", nil)
+}
+
+// SyncAllResult is what one run of the sync job reports.
+type SyncAllResult struct {
+	AccountsSynced int      `json:"accounts_synced"`
+	NewEmails      int      `json:"new_emails"`
+	Errors         []string `json:"errors"`
+}
+
+// doSyncAll syncs every user's accounts. Each account is loaded with its
+// secrets as its owner, so password and OAuth accounts both sign in.
+func (h *handler) doSyncAll(ctx context.Context) (*SyncAllResult, error) {
+	accounts, err := h.app.Store.ListAllAccounts(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	totalNew := 0
-	var errors []string
+	result := &SyncAllResult{AccountsSynced: len(accounts), Errors: make([]string, 0)}
 	for _, a := range accounts {
-		account := a
-		if account.NeedsOAuth() {
-			account, err = h.app.Store.GetAccountWithTokens(ctx, a.ID)
-			if err != nil {
-				errors = append(errors, a.Name+": "+err.Error())
-				continue
-			}
-		}
-		result, err := SyncAccount(ctx, h.app.Store, account, 200, &SyncConfig{CoreURL: h.app.CoreURL, AuthToken: h.app.AuthToken})
+		account, err := h.loadAccount(ctx, a.UserID, a.ID)
 		if err != nil {
-			errors = append(errors, a.Name+": "+err.Error())
-			h.app.Store.UpdateSyncStatus(ctx, a.ID, err.Error())
+			result.Errors = append(result.Errors, a.Name+": "+err.Error())
 			continue
 		}
-		h.app.Store.UpdateSyncStatus(ctx, a.ID, "")
-		totalNew += result.NewEmails
+		synced, err := SyncAccount(ctx, h.app.Store, account, 200, h.syncConfig())
+		h.recordSync(ctx, a.ID, err)
+		if err != nil {
+			result.Errors = append(result.Errors, a.Name+": "+err.Error())
+			continue
+		}
+		result.NewEmails += synced.NewEmails
 	}
-
-	return map[string]interface{}{
-		"accounts_synced": len(accounts),
-		"new_emails":      totalNew,
-		"errors":          errors,
-	}, nil
+	return result, nil
 }
 
+// handleSyncAll is the sync job automation runs every five minutes; it acts
+// across every user's accounts, so only core may call it.
 func (h *handler) handleSyncAll(w http.ResponseWriter, r *http.Request) {
-	userID := client.UserIDFromRequest(r)
-
 	work := func(ctx context.Context) (map[string]interface{}, error) {
-		return h.doSyncAll(ctx, userID)
+		result, err := h.doSyncAll(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{
+			"accounts_synced": result.AccountsSynced,
+			"new_emails":      result.NewEmails,
+			"errors":          result.Errors,
+		}, nil
 	}
-
 	if h.app.client.RunAsync(w, r, work) {
 		return
 	}
-
-	result, err := h.doSyncAll(r.Context(), userID)
+	result, err := h.doSyncAll(r.Context())
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
@@ -738,13 +787,14 @@ func (h *handler) handleListFilters(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "account_id is required")
 		return
 	}
-	filters, err := h.app.Store.ListFilters(r.Context(), accountID)
+	if err := h.app.Store.RequireAccount(r.Context(), userID(r), accountID); err != nil {
+		writeStoreErr(w, r, err)
+		return
+	}
+	filters, err := h.app.Store.ListFilters(r.Context(), userID(r), accountID)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 		return
-	}
-	if filters == nil {
-		filters = make([]*Filter, 0)
 	}
 	writeJSON(w, r, http.StatusOK, filters)
 }
@@ -762,16 +812,15 @@ func (h *handler) handleCreateFilter(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "account_id and rule are required")
 		return
 	}
-	filter, err := h.app.Store.CreateFilter(r.Context(), req.AccountID, req.Rule)
+	filter, err := h.app.Store.CreateFilter(r.Context(), userID(r), req.AccountID, req.Rule)
 	if err != nil {
-		writeErr(w, r, http.StatusBadRequest, "%v", err)
+		writeStoreErr(w, r, err)
 		return
 	}
 	writeJSON(w, r, http.StatusCreated, filter)
 }
 
 func (h *handler) handleUpdateFilter(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
 	var req struct {
 		Rule     string `json:"rule"`
 		IsActive bool   `json:"is_active"`
@@ -784,16 +833,18 @@ func (h *handler) handleUpdateFilter(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "rule is required")
 		return
 	}
-	if err := h.app.Store.UpdateFilter(r.Context(), id, req.Rule, req.IsActive); err != nil {
-		writeErr(w, r, http.StatusBadRequest, "%v", err)
+	if err := h.app.Store.UpdateFilter(r.Context(), userID(r), r.PathValue("id"), req.Rule, req.IsActive); err != nil {
+		writeStoreErr(w, r, err)
 		return
 	}
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *handler) handleDeleteFilter(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	h.app.Store.DeleteFilter(r.Context(), id)
+	if err := h.app.Store.DeleteFilter(r.Context(), userID(r), r.PathValue("id")); err != nil {
+		writeStoreErr(w, r, err)
+		return
+	}
 	writeJSON(w, r, http.StatusOK, map[string]bool{"success": true})
 }
 
@@ -821,15 +872,18 @@ func writeErr(w http.ResponseWriter, r *http.Request, status int, format string,
 	httputil.WriteError(w, r, status, format, args...)
 }
 
-// writeAccountErr reports a failed account load: 404 only when the account
-// doesn't exist. Any other error (e.g. a secret that can't be decrypted) is a
-// 500 carrying the real cause, never disguised as "account not found".
-func writeAccountErr(w http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, sql.ErrNoRows) {
-		writeErr(w, r, http.StatusNotFound, "account not found")
-		return
+// writeStoreErr answers 404 for a record that is not the caller's (or does
+// not exist), 400 for an invalid filter rule, and 500 with the real cause for
+// anything else, e.g. a secret that can't be decrypted.
+func writeStoreErr(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		writeErr(w, r, http.StatusNotFound, "not found")
+	case errors.Is(err, ErrInvalidFilter):
+		writeErr(w, r, http.StatusBadRequest, "%v", err)
+	default:
+		writeErr(w, r, http.StatusInternalServerError, "%v", err)
 	}
-	writeErr(w, r, http.StatusInternalServerError, "load account: %v", err)
 }
 
 // writeOAuthPage renders the small popup page the OAuth flow lands on.

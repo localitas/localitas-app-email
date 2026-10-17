@@ -260,7 +260,7 @@ func SyncTrashFolder(ctx context.Context, store *Store, account *Account, maxMes
 		if msg.Envelope == nil || msg.Envelope.MessageId == "" {
 			continue
 		}
-		if err := store.SoftDeleteByMessageID(ctx, msg.Envelope.MessageId); err == nil {
+		if err := store.SoftDeleteByMessageID(ctx, account.ID, msg.Envelope.MessageId); err == nil {
 			marked++
 		}
 	}

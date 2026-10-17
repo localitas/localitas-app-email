@@ -16,7 +16,7 @@ Add and manage email accounts. Each account stores IMAP and SMTP connection deta
 **PUT /api/accounts/{id}** - Update account settings
 **DELETE /api/accounts/{id}** - Remove an account
 **POST /api/accounts/{id}/sync** - Sync a single account
-**POST /api/sync-all** - Sync all accounts
+**POST /api/sync-all** - Sync every account (the scheduled job; only core may call it)
 
 ## Reading Email
 
@@ -31,7 +31,7 @@ Browse emails by folder. The app syncs messages from IMAP and stores them locall
 
 **POST /api/emails/{id}/star** - Toggle star on an email
 **POST /api/emails/{id}/unread** - Mark an email as unread
-**POST /api/emails/{id}/unsubscribe** - Unsubscribe from a mailing list
+**POST /api/emails/{id}/unsubscribe** - Unsubscribe from a mailing list, using the List-Unsubscribe target the email carries
 **DELETE /api/emails/{id}** - Move an email to trash
 **POST /api/emails/{id}/restore** - Restore an email from trash
 **GET /api/trash** - List trashed emails

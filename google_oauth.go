@@ -3,6 +3,7 @@ package email
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -103,7 +104,8 @@ func RefreshGoogleToken(ctx context.Context, refreshToken, clientID, clientSecre
 	return &tok, nil
 }
 
-func (s *Store) SaveOAuthTokens(ctx context.Context, accountID, accessToken, refreshToken string, expiresIn int) error {
+// SaveOAuthTokens stores the tokens of userID's account accountID.
+func (s *Store) SaveOAuthTokens(ctx context.Context, userID, accountID, accessToken, refreshToken string, expiresIn int) error {
 	now := time.Now().UTC().Unix()
 	expiry := now + int64(expiresIn)
 	encAccess, err := client.Encrypt(accessToken)
@@ -114,20 +116,22 @@ func (s *Store) SaveOAuthTokens(ctx context.Context, accountID, accessToken, ref
 	if err != nil {
 		return fmt.Errorf("encrypt refresh_token: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx,
-		"UPDATE accounts SET access_token = ?, refresh_token = ?, token_expiry = ?, updated_at = ? WHERE id = ?",
-		encAccess, encRefresh, expiry, now, accountID)
-	return err
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE accounts SET access_token = ?, refresh_token = ?, token_expiry = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+		encAccess, encRefresh, expiry, now, accountID, userID)
+	return requireOneRow(res, err)
 }
 
-func (s *Store) GetAccountWithTokens(ctx context.Context, id string) (*Account, error) {
-	a, err := s.GetAccount(ctx, id)
+// GetAccountWithTokens returns userID's account id with its decrypted
+// secrets and OAuth tokens.
+func (s *Store) GetAccountWithTokens(ctx context.Context, userID, id string) (*Account, error) {
+	a, err := s.GetAccount(ctx, userID, id)
 	if err != nil {
 		return nil, err
 	}
 	var accessToken, refreshToken string
 	var tokenExpiry int64
-	if err := s.db.QueryRowContext(ctx, "SELECT COALESCE(access_token,''), COALESCE(refresh_token,''), COALESCE(token_expiry,0) FROM accounts WHERE id = ?", id).
+	if err := s.db.QueryRowContext(ctx, "SELECT COALESCE(access_token,''), COALESCE(refresh_token,''), COALESCE(token_expiry,0) FROM accounts WHERE id = ? AND user_id = ?", id, userID).
 		Scan(&accessToken, &refreshToken, &tokenExpiry); err != nil {
 		return nil, fmt.Errorf("read tokens: %w", err)
 	}
@@ -163,5 +167,32 @@ func EnsureValidToken(ctx context.Context, store *Store, account *Account) error
 		refreshToSave = tok.RefreshToken
 		account.RefreshToken = tok.RefreshToken
 	}
-	return store.SaveOAuthTokens(ctx, account.ID, tok.AccessToken, refreshToSave, tok.ExpiresIn)
+	return store.SaveOAuthTokens(ctx, account.UserID, account.ID, tok.AccessToken, refreshToSave, tok.ExpiresIn)
 }
+
+// sealOAuthState binds an OAuth flow to the user who started it and the
+// account it authorizes. It is encrypted and authenticated, so a callback
+// cannot be pointed at an account its caller did not start the flow for.
+func sealOAuthState(userID, accountID string) (string, error) {
+	return client.Encrypt(userID + "\n" + accountID)
+}
+
+// openOAuthState returns the user and account sealOAuthState bound. A state
+// that was not sealed by this app is refused: Decrypt would pass plaintext
+// through unchanged.
+func openOAuthState(state string) (userID, accountID string, err error) {
+	if !strings.HasPrefix(state, "enc:") {
+		return "", "", errBadOAuthState
+	}
+	plain, err := client.Decrypt(state)
+	if err != nil {
+		return "", "", errBadOAuthState
+	}
+	userID, accountID, ok := strings.Cut(plain, "\n")
+	if !ok || userID == "" || accountID == "" {
+		return "", "", errBadOAuthState
+	}
+	return userID, accountID, nil
+}
+
+var errBadOAuthState = errors.New("invalid OAuth state")

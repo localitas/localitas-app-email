@@ -7,6 +7,7 @@ require (
 	github.com/emersion/go-message v0.18.2
 	github.com/grandcat/zeroconf v1.0.0
 	github.com/localitas/localitas-go v0.1.12
+	github.com/mattn/go-sqlite3 v1.14.47
 	github.com/urfave/cli/v3 v3.9.1
 )
 
