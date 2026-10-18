@@ -3,11 +3,9 @@ package email
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -20,15 +18,24 @@ import (
 	"testing/fstest"
 
 	client "github.com/localitas/localitas-go"
+	"github.com/localitas/localitas-go/identitytest"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 const testAPIToken = "lt_test_email_cluster_token"
 
+// signer signs identity tokens as core does; the app verifies them with its
+// public key and refuses legacy (api_token-derived HMAC) tokens.
+var signer *identitytest.Signer
+
 func TestMain(m *testing.M) {
 	os.Setenv("LOCALITAS_API_TOKEN", testAPIToken)
 	os.Setenv("LOCALITAS_SECRET_KEY", "0123456789abcdef0123456789abcdef")
-	client.SetIdentityKeyFromAPIToken(testAPIToken)
+	var err error
+	if signer, err = identitytest.Install(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	os.Exit(m.Run())
 }
 
@@ -36,12 +43,7 @@ func TestMain(m *testing.M) {
 // the app: base64url JSON, a dot, and the base64url HMAC-SHA256 of the payload
 // under the key derived from the cluster API token.
 func identityToken(userID, permission string) string {
-	raw, _ := json.Marshal(client.TokenInfo{UserID: userID, Email: userID + "@example.com", Permission: permission})
-	payload := base64.RawURLEncoding.EncodeToString(raw)
-	sum := sha256.Sum256([]byte("localitas-internal-token-v1:" + testAPIToken))
-	mac := hmac.New(sha256.New, []byte(base64.StdEncoding.EncodeToString(sum[:])))
-	mac.Write([]byte(payload))
-	return payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return signer.Token(client.TokenInfo{UserID: userID, Email: userID + "@example.com", Permission: permission})
 }
 
 // openTestStore opens a fresh SQLite database migrated with the app's own
