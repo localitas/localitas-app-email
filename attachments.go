@@ -3,11 +3,15 @@ package email
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
+
+	client "github.com/localitas/localitas-go"
 )
 
 // httpClient is a single pooled client shared across attachment save/get and the
@@ -23,72 +27,75 @@ const (
 	oauthTimeout          = 10 * time.Second
 )
 
-func SaveAttachmentToManagedFS(ctx context.Context, coreURL, token, emailID, filename string, data []byte) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, attachmentIOTimeout)
-	defer cancel()
-	storagePath := fmt.Sprintf("email-attachments/%s/%s", emailID, filename)
-	webdavURL := fmt.Sprintf("%s/apps/filesystem/webdav/managed/%s", coreURL, url.PathEscape(storagePath))
-
-	dirURL := fmt.Sprintf("%s/apps/filesystem/webdav/managed/email-attachments/%s/", coreURL, emailID)
-	mkReq, _ := http.NewRequestWithContext(ctx, "MKCOL", dirURL, nil)
-	if token != "" {
-		mkReq.Header.Set("Authorization", "Bearer "+token)
-	}
-	mkResp, _ := httpClient.Do(mkReq)
-	if mkResp != nil {
-		mkResp.Body.Close()
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "PUT", webdavURL, bytes.NewReader(data))
-	if err != nil {
-		return "", err
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("webdav put failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 201 && resp.StatusCode != 200 && resp.StatusCode != 204 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("webdav put %d: %s", resp.StatusCode, string(body[:min(len(body), 200)]))
-	}
-
-	return storagePath, nil
+// StoredFile is the managed file an attachment is kept in, in the
+// storage of the token's user, held by ID.
+type StoredFile struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
-func GetAttachmentFromManagedFS(ctx context.Context, coreURL, token, storagePath string) ([]byte, string, error) {
+func filesClient(coreURL, token string) *client.Client {
+	return client.New(coreURL).WithHTTPClient(httpClient).WithToken(token)
+}
+
+// attachmentFolder is the managed folder holding an email's attachments.
+func attachmentFolder(emailID string) string {
+	return "email-attachments/" + emailID
+}
+
+// attachmentName is filename made a valid file name.
+func attachmentName(filename string) string {
+	name := strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r < ' ' {
+			return '_'
+		}
+		return r
+	}, strings.TrimSpace(filename))
+	if name == "" || name == "." || name == ".." {
+		return "attachment"
+	}
+	return name
+}
+
+// SaveAttachmentToManagedFS keeps data as a file in the email's folder,
+// made as needed, under a name the filesystem frees for it, so two
+// attachments of one name are both kept.
+func SaveAttachmentToManagedFS(ctx context.Context, coreURL, token, emailID, filename string, data []byte) (*StoredFile, error) {
 	ctx, cancel := context.WithTimeout(ctx, attachmentIOTimeout)
 	defer cancel()
-	webdavURL := fmt.Sprintf("%s/apps/filesystem/webdav/managed/%s", coreURL, url.PathEscape(storagePath))
+	q := url.Values{"folder": {attachmentFolder(emailID)}, "name": {attachmentName(filename)}, "conflict": {"rename"}}
+	var out StoredFile
+	if err := filesClient(coreURL, token).Send(ctx, "POST", "/apps/filesystem/api/nodes?"+q.Encode(), "application/octet-stream", bytes.NewReader(data), &out); err != nil {
+		return nil, fmt.Errorf("store attachment %s: %w", filename, err)
+	}
+	return &out, nil
+}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", webdavURL, nil)
-	if err != nil {
-		return nil, "", err
+// ResolveAttachmentPath returns the file at path in the token user's
+// managed storage, for attachments stored by path before IDs.
+func ResolveAttachmentPath(ctx context.Context, coreURL, token, path string) (*StoredFile, error) {
+	ctx, cancel := context.WithTimeout(ctx, attachmentIOTimeout)
+	defer cancel()
+	var out StoredFile
+	if err := filesClient(coreURL, token).Do(ctx, "POST", "/apps/filesystem/api/nodes/resolve", struct {
+		Path string `json:"path"`
+	}{path}, &out); err != nil {
+		return nil, fmt.Errorf("resolve attachment %s: %w", path, err)
 	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
+	return &out, nil
+}
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, "", err
-	}
-	defer resp.Body.Close()
+// DownloadAttachment streams managed file fileID to w, from whichever node
+// holds it.
+func DownloadAttachment(ctx context.Context, coreURL, token, fileID string, w io.Writer) error {
+	ctx, cancel := context.WithTimeout(ctx, attachmentIOTimeout)
+	defer cancel()
+	_, err := filesClient(coreURL, token).Download(ctx, "/apps/filesystem/managed/"+url.PathEscape(fileID), w)
+	return err
+}
 
-	if resp.StatusCode != 200 {
-		return nil, "", fmt.Errorf("webdav get %d", resp.StatusCode)
-	}
-
-	data, _ := io.ReadAll(resp.Body)
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	return data, contentType, nil
+// isNotFound reports whether err is core answering 404.
+func isNotFound(err error) bool {
+	var apiErr *client.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }

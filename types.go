@@ -83,7 +83,10 @@ type Attachment struct {
 	Filename    string `json:"filename"`
 	ContentType string `json:"content_type"`
 	SizeBytes   int64  `json:"size_bytes"`
-	StoragePath string `json:"storage_path"`
+	// FileID is the managed file holding the attachment. StoragePath is
+	// where one stored before IDs was, until it is resolved.
+	FileID      string `json:"file_id,omitempty"`
+	StoragePath string `json:"storage_path,omitempty"`
 	CreatedAt   int64  `json:"created_at"`
 }
 

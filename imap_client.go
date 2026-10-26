@@ -795,12 +795,14 @@ func saveEmailAttachments(ctx context.Context, store *Store, cfg *SyncConfig, ac
 			continue
 		}
 
-		storagePath, err := SaveAttachmentToManagedFS(ctx, cfg.CoreURL, cfg.AuthToken, emailID, att.Filename, att.Data)
+		file, err := SaveAttachmentToManagedFS(ctx, cfg.CoreURL, cfg.AuthToken, emailID, att.Filename, att.Data)
 		if err != nil {
 			logger.Error("failed to save attachment", "filename", att.Filename, "error", err)
 			continue
 		}
-		store.InsertAttachment(ctx, emailID, accountID, att.Filename, att.ContentType, storagePath, int64(len(att.Data)))
+		if _, err := store.InsertAttachment(ctx, emailID, accountID, att.Filename, att.ContentType, file.ID, int64(len(att.Data))); err != nil {
+			logger.Error("failed to record attachment", "filename", att.Filename, "file_id", file.ID, "error", err)
+		}
 	}
 }
 

@@ -1,12 +1,14 @@
 package email
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -579,17 +581,53 @@ func (h *handler) handleDownloadAttachment(w http.ResponseWriter, r *http.Reques
 		writeStoreErr(w, r, err)
 		return
 	}
-	data, contentType, err := GetAttachmentFromManagedFS(r.Context(), h.app.CoreURL, h.app.AuthToken, att.StoragePath)
+	fileID, err := h.app.attachmentFileID(r.Context(), att)
 	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "download failed: %v", err)
+		status := http.StatusBadGateway
+		if isNotFound(err) {
+			status = http.StatusNotFound
+		}
+		writeErr(w, r, status, "download failed: %v", err)
 		return
 	}
+	// The bytes are read before any header is sent, so a failure is
+	// answered as one rather than as a truncated download.
+	var buf bytes.Buffer
+	if err := DownloadAttachment(r.Context(), h.app.CoreURL, h.app.AuthToken, fileID, &buf); err != nil {
+		status := http.StatusBadGateway
+		if isNotFound(err) {
+			status = http.StatusNotFound
+		}
+		writeErr(w, r, status, "download failed: %v", err)
+		return
+	}
+	contentType := att.ContentType
 	if contentType == "" {
-		contentType = att.ContentType
+		contentType = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+att.Filename+"\"")
-	w.Write(data)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": att.Filename}))
+	w.Write(buf.Bytes())
+}
+
+// attachmentFileID returns the managed file of att. One stored by path
+// before IDs is resolved once and its ID recorded.
+func (a *App) attachmentFileID(ctx context.Context, att *Attachment) (string, error) {
+	if att.FileID != "" {
+		return att.FileID, nil
+	}
+	if att.StoragePath == "" {
+		return "", fmt.Errorf("attachment %s has no stored file", att.ID)
+	}
+	file, err := ResolveAttachmentPath(ctx, a.CoreURL, a.AuthToken, att.StoragePath)
+	if err != nil {
+		return "", err
+	}
+	if err := a.Store.SetAttachmentFile(ctx, att.ID, file.ID); err != nil {
+		return "", err
+	}
+	att.FileID, att.StoragePath = file.ID, ""
+	return file.ID, nil
 }
 
 func (h *handler) handleSaveDraft(w http.ResponseWriter, r *http.Request) {

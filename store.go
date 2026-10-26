@@ -560,24 +560,32 @@ func (s *Store) DeleteDraft(ctx context.Context, userID, id string) error {
 
 // Attachments
 
-func (s *Store) InsertAttachment(ctx context.Context, emailID, accountID, filename, contentType, storagePath string, sizeBytes int64) (*Attachment, error) {
+// InsertAttachment records an attachment kept in managed file fileID.
+func (s *Store) InsertAttachment(ctx context.Context, emailID, accountID, filename, contentType, fileID string, sizeBytes int64) (*Attachment, error) {
 	id := newID()
 	now := time.Now().UTC().Unix()
-	_, err := s.db.ExecContext(ctx, "INSERT INTO attachments (id, email_id, account_id, filename, content_type, size_bytes, storage_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-		id, emailID, accountID, filename, contentType, sizeBytes, storagePath, now)
+	_, err := s.db.ExecContext(ctx, "INSERT INTO attachments (id, email_id, account_id, filename, content_type, size_bytes, file_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		id, emailID, accountID, filename, contentType, sizeBytes, fileID, now)
 	if err != nil {
 		return nil, err
 	}
-	return &Attachment{ID: id, EmailID: emailID, AccountID: accountID, Filename: filename, ContentType: contentType, SizeBytes: sizeBytes, StoragePath: storagePath, CreatedAt: now}, nil
+	return &Attachment{ID: id, EmailID: emailID, AccountID: accountID, Filename: filename, ContentType: contentType, SizeBytes: sizeBytes, FileID: fileID, CreatedAt: now}, nil
 }
 
-const attachmentColumns = "id, email_id, account_id, filename, content_type, size_bytes, storage_path, created_at"
+// SetAttachmentFile records the managed file an attachment stored by path
+// before IDs resolved to.
+func (s *Store) SetAttachmentFile(ctx context.Context, id, fileID string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE attachments SET file_id = ?, storage_path = '' WHERE id = ?", fileID, id)
+	return err
+}
+
+const attachmentColumns = "id, email_id, account_id, filename, content_type, size_bytes, file_id, storage_path, created_at"
 
 func scanAttachments(rows *sql.Rows) ([]*Attachment, error) {
 	out := make([]*Attachment, 0)
 	for rows.Next() {
 		var a Attachment
-		if err := rows.Scan(&a.ID, &a.EmailID, &a.AccountID, &a.Filename, &a.ContentType, &a.SizeBytes, &a.StoragePath, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.EmailID, &a.AccountID, &a.Filename, &a.ContentType, &a.SizeBytes, &a.FileID, &a.StoragePath, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &a)
