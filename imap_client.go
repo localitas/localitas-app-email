@@ -789,10 +789,16 @@ func saveEmailAttachments(ctx context.Context, store *Store, cfg *SyncConfig, ac
 		return
 	}
 	for _, att := range atts {
-		if cfg.CoreURL != "" && scanAttachment(ctx, cfg, att) {
-			store.MarkDangerous(ctx, emailID)
-			logger.Warn("dangerous attachment detected", "filename", att.Filename, "email_id", emailID)
-			continue
+		if cfg.CoreURL != "" {
+			verdict, err := scanAttachment(ctx, cfg, att)
+			switch verdict {
+			case scanInfected:
+				store.MarkDangerous(ctx, emailID)
+				logger.Warn("dangerous attachment detected", "filename", att.Filename, "email_id", emailID)
+				continue
+			case scanUnscanned:
+				logger.Warn("attachment not scanned for viruses; it is kept, not known clean", "filename", att.Filename, "email_id", emailID, "error", err)
+			}
 		}
 
 		file, err := SaveAttachmentToManagedFS(ctx, cfg.CoreURL, cfg.AuthToken, emailID, att.Filename, att.Data)
@@ -806,22 +812,47 @@ func saveEmailAttachments(ctx context.Context, store *Store, cfg *SyncConfig, ac
 	}
 }
 
-func scanAttachment(ctx context.Context, cfg *SyncConfig, att attachmentData) bool {
+// scanVerdict is what is known of an attachment after asking antivirus.
+type scanVerdict int
+
+const (
+	// scanUnscanned: antivirus could not be asked or gave no verdict, so the
+	// attachment is not known to be clean.
+	scanUnscanned scanVerdict = iota
+	scanClean
+	scanInfected
+)
+
+// antivirusScanPath is the antivirus app's file scan, reached through core.
+const antivirusScanPath = "/apps/ext/antivirus/api/scan-file"
+
+// antivirusScanResult is the part of antivirus's scan result email reads.
+type antivirusScanResult struct {
+	Verdict    string `json:"verdict"`
+	ThreatName string `json:"threat_name,omitempty"`
+}
+
+// scanAttachment asks antivirus whether att is infected. Anything short of
+// a clean or infected verdict is scanUnscanned, with the reason.
+func scanAttachment(ctx context.Context, cfg *SyncConfig, att attachmentData) (scanVerdict, error) {
 	ctx, cancel := context.WithTimeout(ctx, attachmentScanTimeout)
 	defer cancel()
-	scanURL := cfg.CoreURL + "/apps/ext/antivirus/api/scan"
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 	part, err := writer.CreateFormFile("file", att.Filename)
 	if err != nil {
-		return false
+		return scanUnscanned, err
 	}
-	part.Write(att.Data)
-	writer.Close()
+	if _, err := part.Write(att.Data); err != nil {
+		return scanUnscanned, err
+	}
+	if err := writer.Close(); err != nil {
+		return scanUnscanned, err
+	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", scanURL, body)
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.CoreURL+antivirusScanPath, body)
 	if err != nil {
-		return false
+		return scanUnscanned, err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	if cfg.AuthToken != "" {
@@ -830,20 +861,26 @@ func scanAttachment(ctx context.Context, cfg *SyncConfig, att attachmentData) bo
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		logger.Warn("antivirus scan unavailable", "filename", att.Filename, "error", err)
-		return false
+		return scanUnscanned, fmt.Errorf("reach antivirus: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return false
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return scanUnscanned, fmt.Errorf("antivirus answered %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
 	}
 
-	var result struct {
-		Verdict string `json:"verdict"`
+	var result antivirusScanResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return scanUnscanned, fmt.Errorf("read antivirus verdict: %w", err)
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
-	return result.Verdict == "infected"
+	switch result.Verdict {
+	case "clean":
+		return scanClean, nil
+	case "infected":
+		return scanInfected, nil
+	}
+	return scanUnscanned, fmt.Errorf("antivirus gave no verdict (%q)", result.Verdict)
 }
 
 func syncFolderFlags(ctx context.Context, c *imapclient.Client, store *Store, accountID string, folder *Folder) {
