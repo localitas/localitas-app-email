@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -92,8 +93,15 @@ func TestSyncAllIsSystemOnly(t *testing.T) {
 	w := httptest.NewRecorder()
 	env.mux.ServeHTTP(w, req)
 	expectStatus(t, w, http.StatusOK, "core calls sync-all")
-	result := decode[SyncAllResult](t, w)
-	if result.AccountsSynced != 2 || len(result.Errors) != 2 {
+	assertWireKeys(t, w.Body.Bytes(), "accounts_synced", "new_emails", "errors")
+	var result SyncAllResult
+	strictDecode(t, w.Body.Bytes(), &result)
+	if result.AccountsSynced != 2 || result.NewEmails != 0 || len(result.Errors) != 2 {
 		t.Fatalf("sync-all = %+v, want both users' accounts attempted (each failing on the closed port)", result)
+	}
+	for _, e := range result.Errors {
+		if !strings.HasPrefix(e, "alice: ") && !strings.HasPrefix(e, "bob: ") {
+			t.Fatalf("sync-all error %q is not an account's", e)
+		}
 	}
 }

@@ -797,18 +797,7 @@ func (h *handler) doSyncAll(ctx context.Context) (*SyncAllResult, error) {
 // handleSyncAll is the sync job automation runs every five minutes; it acts
 // across every user's accounts, so only core may call it.
 func (h *handler) handleSyncAll(w http.ResponseWriter, r *http.Request) {
-	work := func(ctx context.Context) (map[string]interface{}, error) {
-		result, err := h.doSyncAll(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]interface{}{
-			"accounts_synced": result.AccountsSynced,
-			"new_emails":      result.NewEmails,
-			"errors":          result.Errors,
-		}, nil
-	}
-	if h.app.client.RunAsync(w, r, work) {
+	if client.RunAsync(h.app.client, w, r, h.doSyncAll) {
 		return
 	}
 	result, err := h.doSyncAll(r.Context())
