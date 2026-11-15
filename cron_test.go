@@ -1,100 +1,85 @@
 package email
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"slices"
 	"testing"
+
+	client "github.com/localitas/localitas-go"
 )
 
-func TestHandleCron(t *testing.T) {
-	req := httptest.NewRequest("GET", "/cron.json", nil)
-	w := httptest.NewRecorder()
-	HandleCron(w, req)
+func strictDecode(t *testing.T, data []byte, into any) {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(into); err != nil {
+		t.Fatalf("decode %s: %v", data, err)
+	}
+}
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+// assertWireKeys pins a response's top-level JSON keys, in order: a client
+// reads them by name, so a renamed field is a broken response even when the
+// body still decodes into its own type.
+func assertWireKeys(t *testing.T, data []byte, want ...string) {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		t.Fatalf("%s is not a JSON object", data)
+	}
+	var got []string
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			t.Fatalf("decode %s: %v", data, err)
+		}
+		got = append(got, tok.(string))
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			t.Fatalf("decode %s: %v", data, err)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("response keys %v, want %v", got, want)
+	}
+}
+
+func assertCronJob(t *testing.T, got, want client.CronJob) {
+	t.Helper()
+	if got.ID != want.ID || got.Path != want.Path || got.Method != want.Method || got.Schedule != want.Schedule ||
+		got.Description != want.Description || got.Timeout != want.Timeout || got.NotifyLevel != want.NotifyLevel ||
+		got.ExecutionStrategy != want.ExecutionStrategy || len(got.Headers) != len(want.Headers) || len(got.Body) != len(want.Body) {
+		t.Fatalf("job %+v, want %+v", got, want)
+	}
+	if (got.Retry == nil) != (want.Retry == nil) || (got.Retry != nil && *got.Retry != *want.Retry) {
+		t.Fatalf("job %s retry %+v, want %+v", want.ID, got.Retry, want.Retry)
+	}
+	if (got.Auth == nil) != (want.Auth == nil) || (got.Auth != nil && *got.Auth != *want.Auth) {
+		t.Fatalf("job %s auth %+v, want %+v", want.ID, got.Auth, want.Auth)
+	}
+}
+
+func TestHandleCron_TypedJobs(t *testing.T) {
+	rec := httptest.NewRecorder()
+	HandleCron(rec, httptest.NewRequest("GET", "/cron.json", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("cron.json: %d %q", rec.Code, rec.Header().Get("Content-Type"))
 	}
 
-	var spec struct {
-		Jobs []struct {
-			ID       string `json:"id"`
-			Path     string `json:"path"`
-			Method   string `json:"method"`
-			Schedule string `json:"schedule"`
-		} `json:"jobs"`
-	}
-	if err := json.NewDecoder(w.Body).Decode(&spec); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
+	var spec client.CronSpec
+	strictDecode(t, rec.Body.Bytes(), &spec)
 	if len(spec.Jobs) != 1 {
 		t.Fatalf("expected 1 job, got %d", len(spec.Jobs))
 	}
-
-	job := spec.Jobs[0]
-	if job.ID != "cron:email:sync-all" {
-		t.Errorf("expected id cron:email:sync-all, got %s", job.ID)
-	}
-	if job.Path != "/api/sync-all" {
-		t.Errorf("expected path /api/sync-all, got %s", job.Path)
-	}
-	if job.Schedule != "*/5 * * * *" {
-		t.Errorf("expected schedule */5 * * * *, got %s", job.Schedule)
-	}
-}
-
-func TestHandleCron_ContentType(t *testing.T) {
-	req := httptest.NewRequest("GET", "/cron.json", nil)
-	w := httptest.NewRecorder()
-	HandleCron(w, req)
-
-	ct := w.Header().Get("Content-Type")
-	if ct != "application/json" {
-		t.Errorf("expected Content-Type application/json, got %s", ct)
-	}
-}
-
-func TestHandleCron_RetryConfig(t *testing.T) {
-	req := httptest.NewRequest("GET", "/cron.json", nil)
-	w := httptest.NewRecorder()
-	HandleCron(w, req)
-
-	var spec struct {
-		Jobs []struct {
-			Retry struct {
-				MaxAttempts int `json:"max_attempts"`
-			} `json:"retry"`
-		} `json:"jobs"`
-	}
-	if err := json.NewDecoder(w.Body).Decode(&spec); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	if spec.Jobs[0].Retry.MaxAttempts != 1 {
-		t.Errorf("expected max_attempts 1, got %d", spec.Jobs[0].Retry.MaxAttempts)
-	}
-}
-
-func TestHandleCron_ScheduleFormat(t *testing.T) {
-	req := httptest.NewRequest("GET", "/cron.json", nil)
-	w := httptest.NewRecorder()
-	HandleCron(w, req)
-
-	var spec struct {
-		Jobs []struct {
-			Schedule string `json:"schedule"`
-		} `json:"jobs"`
-	}
-	if err := json.NewDecoder(w.Body).Decode(&spec); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	for i, job := range spec.Jobs {
-		fields := strings.Fields(job.Schedule)
-		if len(fields) != 5 {
-			t.Errorf("job[%d]: expected 5 cron fields, got %d in %q", i, len(fields), job.Schedule)
-		}
-	}
+	assertCronJob(t, spec.Jobs[0], client.CronJob{
+		ID:          "cron:email:sync-all",
+		Path:        "/api/sync-all",
+		Method:      "POST",
+		Schedule:    "*/5 * * * *",
+		Description: "Syncs all email accounts",
+		Timeout:     "120s",
+		Retry:       &client.CronRetry{MaxAttempts: 1},
+	})
 }
