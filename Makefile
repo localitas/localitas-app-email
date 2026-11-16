@@ -14,13 +14,12 @@ WORK_DIR := $(shell pwd)
 # ── Build & Test ──────────────────────────────────────────────
 
 build: lint
-
-build-linux: lint
-	@mkdir -p bin
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -trimpath \
-		-o email-server-linux-amd64 ./cmd/email-server
 	@mkdir -p bin
 	go build -o bin/email-server ./cmd/email-server
+
+build-linux: lint
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -trimpath \
+		-o email-server-linux-amd64 ./cmd/email-server
 
 test: lint
 	CGO_ENABLED=1 go test -tags fts5 -v ./...
