@@ -72,55 +72,68 @@ Create rules to automatically organize incoming email.
 
 ## Build & Deploy
 
+Run these in the app's repository, `~/localitas-app-email`.
+
 ### Version
 
 ```bash
-./email-server --version
+bin/email-server --version
 ```
 
 ### Build from source
 
 ```bash
-# Development (native)
-cd apps/email && go build -o bin/email-server ./cmd/email-server
+# Native binary
+go build -o bin/email-server ./cmd/email-server
 
-# Cross-compile for Linux
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -trimpath -o bin/email-server-linux-amd64 ./cmd/email-server
+# Native binary plus the Linux amd64 binary the Docker image is built from (email-server-linux-amd64)
+make build-linux
 ```
+
+`make lint` runs gofmt and go vet; `make test` runs them and then the tests. `make build` runs only the lint step.
+
+### Run natively
+
+```bash
+make start   # writes the launchd service com.localitas.app.email for bin/email-server and loads it on port 9208
+make stop
+make logs    # follows ~/.localitas/logs/email/stdout.log
+```
+
+The app announces itself to core when it starts, and core serves it at `/apps/ext/email/`.
 
 ### Docker
 
-Build a Docker image directly from the binary:
-
 ```bash
-# Default base image (debian:12-slim)
-./email-server docker-build
-
-# Custom base image
-./email-server docker-build --base ubuntu:24.04
-
-# Custom Dockerfile
-./email-server docker-build --dockerfile ./my.Dockerfile
-
-# Tag and push to registry
-./email-server docker-build --tag ghcr.io/localitas/email:latest --push
+make build-docker   # builds the Linux binary and the email:latest image
+make start-docker   # runs container "email" on port 9208, labelled localitas.app=true
+make stop-docker
+make logs-docker
 ```
 
-The `docker-build` command requires a Linux amd64 binary in the same directory. Run `make deploy-build` from the project root first.
+Core registers containers labelled `localitas.app=true` once Docker reports them healthy.
+
+### Publish
+
+```bash
+# Run the tests, build the image, push ghcr.io/localitas/localitas-app-email:latest and :<VERSION>
+make docker-push
+
+# Build dist/email-server-darwin-arm64 and dist/email-server-darwin-amd64
+# and create GitHub release vX.Y.Z on this repository with them
+make release VERSION=vX.Y.Z
+```
+
+`VERSION` defaults to `git describe --tags --always --dirty`.
 
 ### Download
 
-Pre-built binaries are available on the [GitHub releases page](https://github.com/localitas/localitas/releases).
+Pre-built macOS binaries are on the [releases page](https://github.com/localitas/localitas-app-email/releases):
+- `email-server-darwin-arm64` (Apple Silicon)
+- `email-server-darwin-amd64` (Intel)
 
-Each release includes three builds per app:
-- `email-server-darwin-arm64` (macOS Apple Silicon)
-- `email-server-linux-amd64` (Linux x86_64)
-- `email-server-linux-arm64` (Linux ARM64)
+Every push to `main` publishes a release: `.github/workflows/release.yml` runs the tests and releases both binaries as `v0.1.<commit count>.<UTC timestamp>`. `make release` publishes one by hand.
 
 Download with the GitHub CLI:
 
-    gh release download --repo localitas/localitas --pattern 'email-server-*'
-
-### Release
-
-All app binaries are published to GitHub releases as part of `make deploy-upload-image`.
+    gh release download --repo localitas/localitas-app-email --pattern 'email-server-*'
