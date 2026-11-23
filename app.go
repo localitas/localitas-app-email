@@ -62,10 +62,16 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	tmpl.ExecuteTemplate(w, "index.html", map[string]interface{}{
-		"BasePath": a.BasePath,
-		"DocsHTML": RenderDocsHTML(EmailAPIDoc),
+	tmpl.ExecuteTemplate(w, "index.html", indexPage{
+		BasePath: a.BasePath,
+		DocsHTML: RenderDocsHTML(EmailAPIDoc),
 	})
+}
+
+// indexPage is index.html's data.
+type indexPage struct {
+	BasePath string
+	DocsHTML template.HTML
 }
 
 func (a *App) RegisterRoutes(mux *http.ServeMux) {
