@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	client "github.com/localitas/localitas-go"
 )
 
 func TestHandleSwagger(t *testing.T) {
@@ -14,7 +16,7 @@ func TestHandleSwagger(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	var spec APIDoc
+	var spec client.APISpec
 	if err := json.Unmarshal(w.Body.Bytes(), &spec); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
@@ -174,7 +176,7 @@ func TestIntParam(t *testing.T) {
 func TestHandleSwagger_AllEndpoints(t *testing.T) {
 	w := httptest.NewRecorder()
 	HandleSwagger(w, httptest.NewRequest("GET", "/swagger.json", nil))
-	var spec APIDoc
+	var spec client.APISpec
 	json.Unmarshal(w.Body.Bytes(), &spec)
 
 	expected := []string{"/api/emails/{id}", "/api/compose", "/api/trash"}
